@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # macOS 14 runner ships Python 3.12; node-gyp (via node-pty) still needs
+      # distutils — removed from stdlib in 3.12+. Install setuptools to bring
+      # it back. PEP 668 makes Homebrew Python externally-managed, so we use
+      # a venv (cleaner than --break-system-packages).
+      - name: Install setuptools for node-gyp
+        run: |
+          python3 -m venv "$HOME/build-venv"
+          "$HOME/build-venv/bin/pip" install setuptools
+          echo "PYTHON=$HOME/build-venv/bin/python3" >> "$GITHUB_ENV"
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Typecheck runs in ci.yml on PRs. We deliberately skip it here so a
+      # latent type error never blocks a release of a working build.
+
+      - name: Import Apple Developer ID certificate into a temp keychain
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          set -e
+          CERT_PATH=$RUNNER_TEMP/cert.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/build.keychain
+          KEYCHAIN_PASSWORD=$(uuidgen)
+
+          echo "$APPLE_CERTIFICATE_BASE64" | base64 -d > "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+          security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+      - name: Build + sign + notarize + package
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # electron-builder signing
+          CSC_KEYCHAIN: ${{ runner.temp }}/build.keychain
+          # electron-builder notarization (via notarytool)
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run package
+
+      - name: Upload artifacts (for non-tag runs)
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        uses: actions/upload-artifact@v4
+        with:
+          name: alby-macos
+          path: |
+            dist/*.dmg
+            dist/*.zip
+            dist/latest-mac.yml

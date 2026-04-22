@@ -1,0 +1,37 @@
+appId: sh.alby.desktop
+productName: Alby
+directories:
+  buildResources: resources
+  output: dist
+files:
+  - out/**
+  - package.json
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.*'
+  - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md,CONTRIBUTING.md,CODE_OF_CONDUCT.md}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json,tsconfig.node.tsbuildinfo}'
+  - '!resources/**'
+mac:
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+    - target: zip
+      arch: [arm64, x64]
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.plist
+  notarize:
+    teamId: S69XDW999Q
+dmg:
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+  title: '${productName} ${version}'
+npmRebuild: true
+publish:
+  provider: github
+  owner: alby-sh
+  repo: alby
+  releaseType: release

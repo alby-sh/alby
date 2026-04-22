@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Build output
+out/
+dist/
+build/
+
+# TypeScript
+*.tsbuildinfo
+
+# Database
+*.db
+*.db-journal
+
+# Environment
+.env
+.env.*.local
+.env.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+.npm/
+
+# Coverage
+coverage/
+
+# Plans
+.claude/
+
+# Claude dev notes (contains Apple credentials — never commit)
+CLAUDE.md
+
+# Apple signing certificates (backup copies — never commit)
+secrets/
+*.p12
+*.cer
