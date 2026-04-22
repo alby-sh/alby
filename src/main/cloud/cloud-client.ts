@@ -328,7 +328,7 @@ export const cloudClient = {
   listRoutines(environmentId: string): Promise<Routine[]> {
     return request('GET', `/api/environments/${environmentId}/routines`)
   },
-  createRoutine(environmentId: string, data: { id?: string; name: string; cron_expression: string; interval_seconds: number; agent_type: string; prompt: string; enabled?: boolean }): Promise<Routine> {
+  createRoutine(environmentId: string, data: { id?: string; name: string; cron_expression: string | null; interval_seconds: number | null; agent_type: string; prompt: string; enabled?: boolean }): Promise<Routine> {
     return request('POST', `/api/environments/${environmentId}/routines`, data)
   },
   updateRoutine(id: string, data: Partial<Routine>): Promise<Routine> {

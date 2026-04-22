@@ -179,7 +179,19 @@ export default function App() {
         if (pending.length > 0) route(pending[pending.length - 1].issueId)
       })
       .catch(() => { /* ignore */ })
-    return unsub
+    // Agent-finish notification clicks: same navigation shape as issue deep
+    // links, but anchored on an agent id. Select the project (which opens
+    // the secondary sidebar) then the specific session so the user lands
+    // on the output they were notified about.
+    const unsubAgent = window.electronAPI.notifications.onAgentClick(({ agentId, projectId }) => {
+      const store = useAppStore.getState()
+      if (!store.expandedProjects.has(projectId)) {
+        store.toggleProjectExpanded(projectId)
+      }
+      store.selectProject(projectId)
+      store.setActiveAgent(agentId)
+    })
+    return () => { unsub(); unsubAgent() }
   }, [])
 
   useEffect(() => {

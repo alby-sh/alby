@@ -400,12 +400,45 @@ function notifyIssue(name: string, payload: IssueLivePayload): void {
       ? `alby-issue-${payload.issue_id}-events`
       : `alby-issue-${payload.issue_id}`
   try {
-    const api = (window as unknown as {
-      electronAPI?: { notifications?: { issue?: (p: { title: string; body: string; tag?: string }) => void } }
-    }).electronAPI
-    api?.notifications?.issue?.({ title, body, tag })
+    // Include the issueId so clicking the notification navigates the renderer
+    // to the issue detail view (same path as the alby:// deep link).
+    window.electronAPI.notifications.issue({ title, body, tag, issueId: payload.issue_id })
   } catch (err) {
     console.warn('[sync] notification failed:', err)
+  }
+}
+
+/** Cross-device agent finish / idle notification. Fires only when the user
+ *  is NOT already on the env (same predicate as markUnreadIfAway uses) —
+ *  no point pinging them about a terminal they're watching. Clicking the
+ *  banner deep-links into that specific session. */
+function notifyAgentFinish(
+  qc: QueryClient,
+  agentId: string,
+  reason: 'completed' | 'error' | 'idle',
+): void {
+  const all = qc.getQueryData<Agent[]>(['agents-all'])
+  const agent = all?.find((a) => a.id === agentId)
+  if (!agent?.project_id) return
+  const appStore = useAppStore.getState()
+  if (appStore.activeAgentId === agentId) return // user is on the tab already
+  const envId = resolveAgentScope(qc, agentId).environmentId
+  if (envId && appStore.selectedEnvironmentId === envId && !appStore.activeAgentId) return
+  const label = agent.tab_name ?? 'Session'
+  const title = reason === 'error' ? 'Alby · Agent crashed'
+    : reason === 'completed' ? 'Alby · Agent finished'
+      : 'Alby · Agent idle'
+  const body = `${label} — ${reason === 'error' ? 'exited with error' : reason === 'completed' ? 'completed' : 'ready for next input'}`
+  try {
+    window.electronAPI.notifications.agent({
+      title,
+      body,
+      tag: `alby-agent-${agentId}-${reason}`,
+      agentId,
+      projectId: agent.project_id,
+    })
+  } catch (err) {
+    console.warn('[sync] agent notification failed:', err)
   }
 }
 
@@ -478,6 +511,8 @@ function handleEntityChanged(
         base.agentId = payload.id
         return base
       })
+      // Native desktop ping so the user knows without hunting in the sidebar.
+      notifyAgentFinish(qc, payload.id, status as 'completed' | 'error')
     }
   }
   // Cross-device "agent just finished a turn" signal. The pty-owning device
@@ -496,6 +531,7 @@ function handleEntityChanged(
       base.agentId = payload.id
       return base
     })
+    notifyAgentFinish(qc, payload.id, 'idle')
   }
   if (payload.entity === 'routine' && payload.action === 'updated') {
     markUnreadIfAway(qc, projectId, 'routine.finished', (qc) => {

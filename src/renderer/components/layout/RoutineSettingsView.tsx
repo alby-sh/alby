@@ -79,13 +79,15 @@ export function RoutineSettingsView({ routineId }: { routineId: string }) {
   useEffect(() => {
     if (routine) {
       setName(routine.name)
-      setCronExpression(routine.cron_expression)
-      setIntervalSeconds(routine.interval_seconds)
+      setCronExpression(routine.cron_expression ?? '')
+      setIntervalSeconds(routine.interval_seconds ?? 300)
       setAgentType(routine.agent_type)
       setPrompt(routine.prompt)
       setEnabled(!!routine.enabled)
     }
   }, [routine])
+
+  const isManual = routine?.interval_seconds == null
 
   const flashSaved = (key: string): void => {
     setSavedKey(key)
@@ -181,29 +183,46 @@ export function RoutineSettingsView({ routineId }: { routineId: string }) {
 
             <Section
               title="Schedule"
-              description="How often the routine runs. The agent runs once, then sleeps this amount before running again. Supported: '@every Ns/Nm/Nh/Nd' (e.g. '@every 5m') or simple cron like '*/5 * * * *'."
+              description="How often the routine runs. Leave empty / click Manual to make it run only when you press Start. Supported schedule formats: '@every Ns/Nm/Nh/Nd' (e.g. '@every 5m') or simple cron like '*/5 * * * *'."
             >
               <div className="space-y-2">
                 <div className="flex items-center gap-2">
-                  <TextInput value={cronExpression} onChange={setCronExpression} placeholder="@every 5m" className="font-mono" />
+                  <TextInput
+                    value={cronExpression}
+                    onChange={setCronExpression}
+                    placeholder="@every 5m  (leave empty for manual start only)"
+                    className="font-mono"
+                  />
                   <PrimaryButton
                     onClick={() => {
                       const trimmed = cronExpression.trim()
+                      if (!trimmed) {
+                        // Empty → manual-only: null both columns.
+                        saveField({ cron_expression: null, interval_seconds: null }, 'schedule')
+                        return
+                      }
                       const parsed = parseCronToInterval(trimmed)
-                      if (!parsed) { alert('Invalid schedule. Try "@every 5m" or "*/5 * * * *".'); return }
-                      // Save both cron_expression (as user wrote) and interval_seconds
-                      // (authoritative, used by the runtime sleep loop).
+                      if (!parsed) { alert('Invalid schedule. Try "@every 5m" or "*/5 * * * *", or empty for manual-only.'); return }
                       saveField({ cron_expression: parsed.normalized, interval_seconds: parsed.intervalSeconds }, 'schedule')
                       setIntervalSeconds(parsed.intervalSeconds)
                     }}
-                    disabled={updateRoutine.isPending || !cronExpression.trim() || cronExpression.trim() === routine.cron_expression}
+                    disabled={updateRoutine.isPending || cronExpression.trim() === (routine.cron_expression ?? '')}
                   >
                     Save
                   </PrimaryButton>
                 </div>
                 <p className="text-[12px] text-neutral-500">
-                  {cronHuman ? `Runs every ${cronHuman}.` : 'Unrecognized schedule — stick to the supported formats above.'}
-                  {' '}Effective sleep between runs: <code className="text-neutral-300">{intervalSeconds}s</code>.
+                  {!cronExpression.trim()
+                    ? isManual
+                      ? 'Manual-only: press Start in the sidebar to run once.'
+                      : 'Leave empty to switch this routine to manual-only (no automatic ticks).'
+                    : cronHuman
+                      ? `Runs every ${cronHuman}. Effective sleep between runs: `
+                      : 'Unrecognized schedule — stick to the supported formats above.'}
+                  {cronExpression.trim() && cronHuman && (
+                    <code className="text-neutral-300">{intervalSeconds}s</code>
+                  )}
+                  {cronExpression.trim() && cronHuman ? '.' : ''}
                 </p>
                 {savedKey === 'schedule' && <span className="text-[11px] text-emerald-400">Saved</span>}
               </div>

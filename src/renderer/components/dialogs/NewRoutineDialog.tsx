@@ -34,15 +34,15 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
   const { data: environment } = useEnvironment(environmentId)
   const [name, setName] = useState('')
   const [agentType, setAgentType] = useState<RoutineAgentType>('claude')
-  const [mode, setMode] = useState<'preset' | 'custom'>('preset')
+  const [mode, setMode] = useState<'preset' | 'custom' | 'manual'>('preset')
   const [presetCron, setPresetCron] = useState(PRESETS[0].cron)
   const [customCron, setCustomCron] = useState('*/5 * * * *')
   const [prompt, setPrompt] = useState('')
   const createRoutine = useCreateRoutine()
 
-  const currentCron = mode === 'preset' ? presetCron : customCron.trim()
-  const parsed = useMemo(() => parseCronToInterval(currentCron), [currentCron])
-  const validationError = !parsed && mode === 'custom' && customCron.trim().length > 0
+  const currentCron = mode === 'preset' ? presetCron : mode === 'custom' ? customCron.trim() : ''
+  const parsed = useMemo(() => mode === 'manual' ? null : parseCronToInterval(currentCron), [currentCron, mode])
+  const validationError = mode !== 'manual' && !parsed && mode === 'custom' && customCron.trim().length > 0
     ? 'Unsupported cron. Only interval patterns: */N * * * *, 0 */N * * *, 0 * * * *.'
     : null
 
@@ -53,13 +53,14 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (!name.trim() || !prompt.trim() || !parsed) return
+    if (!name.trim() || !prompt.trim()) return
+    if (mode !== 'manual' && !parsed) return
     createRoutine.mutate(
       {
         environment_id: environmentId,
         name: name.trim(),
-        cron_expression: parsed.normalized,
-        interval_seconds: parsed.intervalSeconds,
+        cron_expression: mode === 'manual' ? null : parsed!.normalized,
+        interval_seconds: mode === 'manual' ? null : parsed!.intervalSeconds,
         agent_type: agentType,
         prompt: prompt.trim(),
       },
@@ -108,17 +109,24 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
           </div>
 
           <div className="mb-4">
-            <div className="flex items-center justify-between mb-1">
-              <label className="block text-sm text-[var(--text-secondary)]">Schedule</label>
-              <button
-                type="button"
-                onClick={() => setMode(mode === 'preset' ? 'custom' : 'preset')}
-                className="text-xs text-[var(--accent)] hover:underline"
-              >
-                {mode === 'preset' ? 'Use custom cron' : 'Use preset'}
-              </button>
+            <label className="block text-sm text-[var(--text-secondary)] mb-1.5">Schedule</label>
+            <div className="flex gap-1 mb-2 text-xs">
+              {(['preset', 'custom', 'manual'] as const).map((m) => (
+                <button
+                  key={m}
+                  type="button"
+                  onClick={() => setMode(m)}
+                  className={`px-2.5 h-7 rounded border transition-colors ${
+                    mode === m
+                      ? 'border-[var(--accent)] bg-[var(--accent)]/10 text-[var(--accent)]'
+                      : 'border-[var(--border-color)] bg-[var(--bg-tertiary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+                  }`}
+                >
+                  {m === 'preset' ? 'Preset' : m === 'custom' ? 'Custom cron' : 'Manual start only'}
+                </button>
+              ))}
             </div>
-            {mode === 'preset' ? (
+            {mode === 'preset' && (
               <select
                 value={presetCron}
                 onChange={(e) => setPresetCron(e.target.value)}
@@ -128,7 +136,8 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
                   <option key={p.cron} value={p.cron}>{p.label} ({p.cron})</option>
                 ))}
               </select>
-            ) : (
+            )}
+            {mode === 'custom' && (
               <>
                 <input
                   type="text"
@@ -141,6 +150,13 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
                   <p className="text-xs text-red-400 mt-1">{validationError}</p>
                 )}
               </>
+            )}
+            {mode === 'manual' && (
+              <p className="text-xs text-[var(--text-secondary)] bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded px-3 py-2">
+                No automatic schedule. The routine runs once each time you
+                click <span className="text-[var(--text-primary)]">Start</span> on
+                the sidebar row, then exits.
+              </p>
             )}
             {parsed && (
               <p className="text-xs text-[var(--text-secondary)] mt-1">
@@ -177,7 +193,7 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
             </button>
             <button
               type="submit"
-              disabled={!name.trim() || !prompt.trim() || !parsed || createRoutine.isPending}
+              disabled={!name.trim() || !prompt.trim() || (mode !== 'manual' && !parsed) || createRoutine.isPending}
               className="px-4 py-2 bg-[var(--accent)] hover:bg-[var(--accent-hover)] disabled:opacity-50 rounded text-sm font-medium"
             >
               Create

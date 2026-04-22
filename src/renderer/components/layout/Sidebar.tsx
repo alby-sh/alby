@@ -1418,6 +1418,83 @@ function RoutineBadge({ envId }: { envId: string }) {
  * Operational envs auto-expand when they have running sessions so the user
  * never has to hunt for what's alive. Manual collapse is persisted in the
  * store. */
+
+/**
+ * Play button that runs the env's `launch_command` as a detached background
+ * process. Unlike right-click "Run locally" — which keeps an interactive
+ * terminal around so the user can watch output / send input — this is a
+ * one-shot "fire and forget": the child process is nohup'd, its stdio
+ * redirected to `~/.alby/launch-<envId>.log`, and the owning shell exits
+ * straight away. `exit 0` flips the agent's status to completed so the
+ * tab auto-closes, leaving only the detached build process alive.
+ */
+function LaunchPlayButton({ env }: { env: Environment }) {
+  const spawnAgent = useSpawnAgent()
+  const pushToast = useToastStore((s) => s.push)
+  const [busy, setBusy] = useState(false)
+  const handleClick = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    e.preventDefault()
+    if (!env.launch_command || busy) return
+    setBusy(true)
+    try {
+      let list = (await window.electronAPI.tasks.list(env.id)) as Array<{ id: string; is_default?: 0 | 1 }>
+      let general = list.find((t) => t.is_default === 1)
+      if (!general) {
+        general = (await window.electronAPI.tasks.create({
+          environment_id: env.id,
+          title: 'general',
+        })) as { id: string; is_default?: 0 | 1 }
+        list = [...list, general]
+      }
+      const shortEnv = env.id.slice(0, 8)
+      // Escape single quotes so the launch command survives being wrapped in
+      // a single-quoted bash -c '<cmd>' argument. Classic `'\''` trick.
+      const esc = env.launch_command.replace(/'/g, `'\\''`)
+      const detached = [
+        `mkdir -p "$HOME/.alby"`,
+        `nohup bash -c '${esc}' > "$HOME/.alby/launch-${shortEnv}.log" 2>&1 & disown`,
+        `echo "[alby] launched '${esc}' in background — log at ~/.alby/launch-${shortEnv}.log"`,
+        `exit 0`,
+      ].join(' && ')
+      spawnAgent.mutate(
+        { taskId: general.id, agentType: 'terminal', autoInstall: false },
+        {
+          onSuccess: (agent) => {
+            // Wait for the shell's rc-file load before typing — same 600 ms
+            // settle the right-click path uses.
+            setTimeout(() => {
+              void window.electronAPI.agents.writeStdin(agent.id, `${detached}\n`)
+            }, 600)
+            pushToast({
+              message: `Launched in background — log at ~/.alby/launch-${shortEnv}.log`,
+              durationMs: 6000,
+            })
+          },
+          onError: (err) => {
+            pushToast({ message: `Launch failed: ${(err as Error).message}`, durationMs: 8000 })
+          },
+        },
+      )
+    } catch (err) {
+      console.error('[LaunchPlayButton]', err)
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <button
+      type="button"
+      onClick={handleClick}
+      disabled={busy}
+      title={`Run launch command in background\n\n${env.launch_command}\n\nOutput → ~/.alby/launch-${env.id.slice(0, 8)}.log`}
+      className="shrink-0 w-6 h-6 mr-1 flex items-center justify-center rounded text-emerald-400 hover:bg-emerald-900/30 disabled:opacity-50 transition-colors"
+    >
+      <Play size={12} />
+    </button>
+  )
+}
+
 function EnvironmentGroup({
   environment,
   agentsByTask,
@@ -1556,6 +1633,9 @@ function EnvironmentGroup({
       <div className="ml-auto pl-2 pr-1 flex items-center">
         <GitBadges status={gitStatus} onAction={openGitMenu} />
       </div>
+      {!isDeployEnv && environment.launch_command && (
+        <LaunchPlayButton env={environment} />
+      )}
       <span
         className={`shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
           isDeployEnv

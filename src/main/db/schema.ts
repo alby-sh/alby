@@ -126,8 +126,11 @@ CREATE TABLE IF NOT EXISTS routines (
   id TEXT PRIMARY KEY,
   environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
   name TEXT NOT NULL,
-  cron_expression TEXT NOT NULL,
-  interval_seconds INTEGER NOT NULL,
+  -- Both null = manual-only (no automatic schedule); user clicks Start in
+  -- the sidebar when they want to run. Otherwise interval_seconds drives
+  -- the while-loop cadence and cron_expression is informational.
+  cron_expression TEXT,
+  interval_seconds INTEGER,
   agent_type TEXT NOT NULL DEFAULT 'claude',
   prompt TEXT NOT NULL,
   enabled INTEGER NOT NULL DEFAULT 1,

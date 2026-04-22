@@ -37,7 +37,7 @@ export class RoutineManager {
 
   private buildLoopScript(routine: Routine, remotePath: string): string {
     const agentCmd = `${routine.agent_type} --dangerously-skip-permissions -p "${shellEscape(routine.prompt)}"`
-    return [
+    const header = [
       '#!/bin/bash',
       `# Routine: ${routine.name}`,
       // Source user shell rc so tools installed via nvm/asdf/etc end up in PATH.
@@ -48,12 +48,31 @@ export class RoutineManager {
       `trap 'echo "[routine] stopped"; exit 0' SIGTERM SIGINT`,
       `cd "${shellEscape(remotePath)}" || { echo "[routine] cd failed"; exit 1; }`,
       `echo -e "\\033[36m[routine] started — using $(command -v ${routine.agent_type} || echo 'NOT FOUND'): ${routine.agent_type}\\033[0m"`,
+    ]
+    // Manual-only routines (interval null / 0) run the agent once and exit.
+    // No while-loop, so the user sees the output and the tmux session
+    // naturally closes when the agent finishes — same ergonomics as a
+    // regular Claude tab except kicked off by the Start button.
+    const interval = routine.interval_seconds ?? 0
+    if (!interval || interval <= 0) {
+      return [
+        ...header,
+        `echo -e "\\n\\033[36m[routine] manual run at $(date)\\033[0m"`,
+        agentCmd,
+        'rc=$?',
+        `echo -e "\\033[36m[routine] run finished (exit $rc)\\033[0m"`,
+        'exit $rc',
+        ''
+      ].join('\n')
+    }
+    return [
+      ...header,
       'while true; do',
       `  echo -e "\\n\\033[36m[routine] running at $(date)\\033[0m"`,
       `  ${agentCmd}`,
       `  rc=$?`,
-      `  echo -e "\\033[36m[routine] run finished (exit $rc), sleeping ${routine.interval_seconds}s\\033[0m"`,
-      `  sleep ${routine.interval_seconds}`,
+      `  echo -e "\\033[36m[routine] run finished (exit $rc), sleeping ${interval}s\\033[0m"`,
+      `  sleep ${interval}`,
       'done',
       ''
     ].join('\n')

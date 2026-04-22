@@ -67,6 +67,40 @@ export function initDatabase(): Database.Database {
     db.exec('ALTER TABLE tasks ADD COLUMN is_default INTEGER NOT NULL DEFAULT 0')
   }
 
+  // Relax cron_expression / interval_seconds to nullable on existing
+  // installations so manual-only routines can be saved (schema above already
+  // declares them nullable, but pre-existing tables keep their NOT NULL).
+  // SQLite has no ALTER COLUMN, so we detect via PRAGMA and rebuild once.
+  const routineCols = db.prepare("PRAGMA table_info('routines')").all() as Array<{ name: string; notnull: number }>
+  const cronCol = routineCols.find((c) => c.name === 'cron_expression')
+  const intervalCol = routineCols.find((c) => c.name === 'interval_seconds')
+  if ((cronCol && cronCol.notnull === 1) || (intervalCol && intervalCol.notnull === 1)) {
+    db.exec(`
+      CREATE TABLE routines_new (
+        id TEXT PRIMARY KEY,
+        environment_id TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
+        name TEXT NOT NULL,
+        cron_expression TEXT,
+        interval_seconds INTEGER,
+        agent_type TEXT NOT NULL DEFAULT 'claude',
+        prompt TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        tmux_session_name TEXT,
+        last_run_at TEXT,
+        last_exit_code INTEGER,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO routines_new
+        SELECT id, environment_id, name, cron_expression, interval_seconds,
+               agent_type, prompt, enabled, tmux_session_name, last_run_at,
+               last_exit_code, sort_order, created_at
+        FROM routines;
+      DROP TABLE routines;
+      ALTER TABLE routines_new RENAME TO routines;
+    `)
+  }
+
   const agentColumns = db.prepare("PRAGMA table_info('agents')").all() as { name: string }[]
   if (!agentColumns.some((c) => c.name === 'chat_session_id')) {
     db.exec('ALTER TABLE agents ADD COLUMN chat_session_id TEXT')

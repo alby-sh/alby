@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Logout, Renew } from '@carbon/icons-react'
 import { useAuthStore } from '../../stores/auth-store'
+import { UserAvatar } from '../ui/UserAvatar'
 
 type UpdateState =
   | { kind: 'idle' }
@@ -91,13 +92,7 @@ export function UserMenu({ trigger }: { trigger: React.ReactElement }) {
       {open && (
         <div className="absolute bottom-full left-0 mb-2 w-64 rounded-xl bg-neutral-900 border border-neutral-700 shadow-2xl py-2 z-50">
           <div className="px-3 pb-2 mb-2 border-b border-neutral-800 flex items-center gap-2">
-            {user.avatar_url ? (
-              <img src={user.avatar_url} alt="" className="w-8 h-8 rounded-full bg-neutral-800" />
-            ) : (
-              <div className="w-8 h-8 rounded-full bg-neutral-800 grid place-items-center text-[12px]">
-                {user.name?.charAt(0)?.toUpperCase() ?? '?'}
-              </div>
-            )}
+            <UserAvatar url={user.avatar_url} name={user.name} size={32} />
             <div className="min-w-0">
               <div className="text-[13px] font-medium text-neutral-100 truncate">{user.name}</div>
               <div className="text-[11px] text-neutral-500 truncate">{user.email}</div>

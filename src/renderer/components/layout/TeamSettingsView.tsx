@@ -3,6 +3,7 @@ import { Close, TrashCan, Copy } from '@carbon/icons-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '../../stores/app-store'
 import { useAuthStore } from '../../stores/auth-store'
+import { UserAvatar } from '../ui/UserAvatar'
 
 interface TeamDetail {
   id: string
@@ -132,9 +133,7 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
                 {team.members.length === 0 && <p className="text-[13px] text-neutral-500">No members yet.</p>}
                 {team.members.map((m) => (
                   <div key={m.id} className="flex items-center gap-3 px-3 h-11 rounded-md bg-neutral-900 border border-neutral-800">
-                    {m.avatar_url
-                      ? <img src={m.avatar_url} alt="" className="w-7 h-7 rounded-full bg-neutral-800" />
-                      : <div className="w-7 h-7 rounded-full bg-neutral-800 grid place-items-center text-[11px]">{m.name?.charAt(0).toUpperCase() ?? '?'}</div>}
+                    <UserAvatar url={m.avatar_url} name={m.name} size={28} />
                     <div className="flex-1 min-w-0">
                       <div className="text-[13px] text-neutral-100 truncate">{m.name}</div>
                       <div className="text-[11px] text-neutral-500 truncate">{m.email}</div>

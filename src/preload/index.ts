@@ -280,9 +280,19 @@ const api = {
     /** Fire a native macOS notification via the main-process Notification API.
      *  Preferred over `new Notification(...)` in the renderer because the DOM
      *  version needs a permission grant that swallows the first event — the
-     *  Electron Notification class runs against Notification Center directly. */
-    issue: (payload: { title: string; body: string; tag?: string }) =>
+     *  Electron Notification class runs against Notification Center directly.
+     *  Click navigates the renderer to the issue detail view. */
+    issue: (payload: { title: string; body: string; tag?: string; issueId?: string }) =>
       ipcRenderer.invoke('notifications:issue', payload),
+    /** Agent finish / idle notification. Click focuses Alby, opens the
+     *  project's sidebar, and selects the specific session. */
+    agent: (payload: { title: string; body: string; tag?: string; agentId: string; projectId: string }) =>
+      ipcRenderer.invoke('notifications:agent', payload),
+    onAgentClick: (cb: (data: { agentId: string; projectId: string }) => void) => {
+      const listener = (_: unknown, data: { agentId: string; projectId: string }): void => cb(data)
+      ipcRenderer.on('notification:agent-click', listener)
+      return () => { ipcRenderer.removeListener('notification:agent-click', listener) }
+    },
   },
   teams: {
     list: () => ipcRenderer.invoke('teams:list'),

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { ChevronLeft, Close, Filter } from '@carbon/icons-react'
 import { useAllProjects } from '../../hooks/useProjects'
 import { useAppStore } from '../../stores/app-store'
+import { UserAvatar } from '../ui/UserAvatar'
 import type { AuditEntry } from '../../../shared/types'
 
 function formatRelative(iso: string): string {
@@ -77,11 +78,7 @@ function ActorCell({ actor }: { actor: AuditEntry['actor'] }) {
   if (!actor) return <span className="text-neutral-500">system</span>
   return (
     <div className="flex items-center gap-2 min-w-0">
-      <div className="size-6 rounded-full bg-neutral-800 border border-neutral-900 flex items-center justify-center overflow-hidden text-[10px] text-neutral-200 shrink-0">
-        {actor.avatar_url
-          ? <img src={actor.avatar_url} alt="" className="size-full object-cover" />
-          : <span>{actor.name?.charAt(0)?.toUpperCase() ?? '?'}</span>}
-      </div>
+      <UserAvatar url={actor.avatar_url} name={actor.name} size={24} className="shrink-0" title={actor.email ?? undefined} />
       <span className="truncate text-neutral-200" title={actor.email}>{actor.name}</span>
     </div>
   )

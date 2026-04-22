@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Close } from '@carbon/icons-react'
 import type { Project, Task } from '../../../shared/types'
+import { UserAvatar } from '../ui/UserAvatar'
 
 interface AuditEntry {
   id: number
@@ -102,13 +103,7 @@ export function ProjectAuditDialog({ project, onClose }: { project: Project; onC
         <ul className="divide-y divide-neutral-800">
           {entries.map((e) => (
             <li key={e.id} className="px-4 py-2.5 flex items-start gap-3">
-              <div className="size-7 rounded-full bg-neutral-800 border border-neutral-900 flex items-center justify-center overflow-hidden text-[11px] text-neutral-200 shrink-0">
-                {e.actor?.avatar_url ? (
-                  <img src={e.actor.avatar_url} alt="" className="size-full object-cover" />
-                ) : (
-                  <span>{e.actor?.name?.charAt(0)?.toUpperCase() ?? '?'}</span>
-                )}
-              </div>
+              <UserAvatar url={e.actor?.avatar_url ?? null} name={e.actor?.name ?? null} size={28} className="shrink-0" />
               <div className="min-w-0 flex-1">
                 <div className="text-[13px] text-neutral-100">
                   <span className="font-medium">{e.actor?.name ?? 'system'}</span>{' '}

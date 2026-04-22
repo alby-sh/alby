@@ -308,8 +308,10 @@ export interface Routine {
   id: string
   environment_id: string
   name: string
-  cron_expression: string
-  interval_seconds: number
+  /** Null on both schedule fields → manual-only (no automatic ticks). User
+   *  clicks Start in the sidebar when they want to run it. */
+  cron_expression: string | null
+  interval_seconds: number | null
   agent_type: RoutineAgentType
   prompt: string
   enabled: 0 | 1
@@ -323,16 +325,16 @@ export interface Routine {
 export interface CreateRoutineDTO {
   environment_id: string
   name: string
-  cron_expression: string
-  interval_seconds: number
+  cron_expression: string | null
+  interval_seconds: number | null
   agent_type: RoutineAgentType
   prompt: string
 }
 
 export interface UpdateRoutineDTO {
   name?: string
-  cron_expression?: string
-  interval_seconds?: number
+  cron_expression?: string | null
+  interval_seconds?: number | null
   agent_type?: RoutineAgentType
   prompt?: string
   enabled?: 0 | 1

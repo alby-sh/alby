@@ -334,7 +334,7 @@ app.whenReady().then(() => {
   // and needs no user permission for signed/notarized apps.
   ipcMain.handle(
     'notifications:issue',
-    (_e, payload: { title: string; body: string; tag?: string }) => {
+    (_e, payload: { title: string; body: string; tag?: string; issueId?: string }) => {
       if (!ElectronNotification.isSupported()) return
       const n = new ElectronNotification({
         title: payload.title,
@@ -347,6 +347,45 @@ app.whenReady().then(() => {
         mainWindow.show()
         mainWindow.focus()
         app.focus({ steal: true })
+        // Reuse the existing deep-link channel so the renderer gets exactly
+        // the same payload shape as an `alby://issues/<id>` click: both paths
+        // land in `openIssueById` which selects the project + expands the
+        // sidebar + opens the issue detail. No new renderer code needed.
+        if (payload.issueId && !mainWindow.webContents.isLoading()) {
+          mainWindow.webContents.send('deep-link:issue-open', { issueId: payload.issueId })
+        } else if (payload.issueId) {
+          pendingDeepLinks.push(`alby://issues/${payload.issueId}`)
+        }
+      })
+      n.show()
+    },
+  )
+
+  /**
+   * Desktop notification for an agent transition (idle / completed). Clicking
+   * it focuses Alby, navigates to the owning project's sidebar, and selects
+   * the specific session so the user lands right on the output instead of
+   * having to hunt for which env / task the agent belongs to.
+   */
+  ipcMain.handle(
+    'notifications:agent',
+    (_e, payload: { title: string; body: string; tag?: string; agentId: string; projectId: string }) => {
+      if (!ElectronNotification.isSupported()) return
+      const n = new ElectronNotification({
+        title: payload.title,
+        body: payload.body,
+        silent: false,
+      })
+      n.on('click', () => {
+        if (!mainWindow) return
+        if (mainWindow.isMinimized()) mainWindow.restore()
+        mainWindow.show()
+        mainWindow.focus()
+        app.focus({ steal: true })
+        mainWindow.webContents.send('notification:agent-click', {
+          agentId: payload.agentId,
+          projectId: payload.projectId,
+        })
       })
       n.show()
     },

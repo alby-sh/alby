@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react'
 import { AddLarge, Apps } from '@carbon/icons-react'
 import { UserMenu } from '../auth/UserMenu'
+import { UserAvatar } from '../ui/UserAvatar'
 import { useAuthStore } from '../../stores/auth-store'
 import { useProjects, useReorderProjects, useUpdateProject } from '../../hooks/useProjects'
 import { useAllAgents } from '../../hooks/useAgents'
@@ -340,11 +341,7 @@ function CurrentUserAvatar() {
           title={user.name}
           className="size-8 rounded-full bg-neutral-900 border border-neutral-800 hover:border-neutral-600 overflow-hidden flex items-center justify-center text-[12px] text-neutral-50 transition-colors"
         >
-          {user.avatar_url ? (
-            <img src={user.avatar_url} alt="" className="size-full object-cover" />
-          ) : (
-            <span>{initial}</span>
-          )}
+          <UserAvatar url={user.avatar_url} name={user.name} size={32} className="border-0" />
         </button>
       }
     />

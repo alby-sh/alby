@@ -3,6 +3,7 @@ import { Add, Close, Launch, List, Pin, PinFilled, Settings, Time } from '@carbo
 import { useProjects, useUpdateProject } from '../../hooks/useProjects'
 import { useAllAgents } from '../../hooks/useAgents'
 import { useActivityStore } from '../../stores/activity-store'
+import { UserAvatar } from '../ui/UserAvatar'
 import { useAppStore } from '../../stores/app-store'
 import { useAuthStore } from '../../stores/auth-store'
 import { FaviconOrIdenticon } from '../ui/ProjectIcon'
@@ -22,17 +23,14 @@ function MembersStack({ members }: { members: ProjectMember[] | undefined }) {
   return (
     <div className="flex items-center -space-x-1.5">
       {visible.map((m) => (
-        <div
+        <UserAvatar
           key={m.id}
+          url={m.avatar_url}
+          name={m.name}
+          size={24}
           title={`${m.name} · ${m.email}`}
-          className="size-6 rounded-full bg-neutral-800 border border-neutral-900 flex items-center justify-center overflow-hidden text-[10px] text-neutral-200"
-        >
-          {m.avatar_url ? (
-            <img src={m.avatar_url} alt={m.name} className="size-full object-cover" />
-          ) : (
-            <span>{m.name?.charAt(0)?.toUpperCase() ?? '?'}</span>
-          )}
-        </div>
+          className="border border-neutral-900"
+        />
       ))}
       {extra > 0 && (
         <div
