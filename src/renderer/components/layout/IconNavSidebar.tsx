@@ -140,7 +140,16 @@ export function IconNavSidebar() {
 
   const selectedProjectId = useAppStore((s) => s.selectedProjectId)
   const selectProject = useAppStore((s) => s.selectProject)
+  // Subscribe to every unread map so the primary-sidebar project dot
+  // reacts to roll-up changes (direct byProject entries AND any sub-scope
+  // entry whose denorm projectId matches). Equivalent to calling
+  // `hasProject(id)` for each project on every render, but we avoid the
+  // function-level memo mismatch zustand has with derived selectors.
   const unreadByProject = useUnreadStore((s) => s.byProject)
+  const unreadByStack = useUnreadStore((s) => s.byStack)
+  const unreadByEnvironment = useUnreadStore((s) => s.byEnvironment)
+  const unreadByEnvPin = useUnreadStore((s) => s.byEnvPin)
+  const unreadByStackPin = useUnreadStore((s) => s.byStackPin)
   const openProjectSettings = useAppStore((s) => s.openProjectSettings)
   const showAllProjects = useAppStore((s) => s.showAllProjects)
   const openAllProjects = useAppStore((s) => s.openAllProjects)
@@ -235,7 +244,13 @@ export function IconNavSidebar() {
               project={project}
               active={selectedProjectId === project.id && !showAllProjects}
               working={!!workingByProject.get(project.id)}
-              unread={!!unreadByProject[project.id]}
+              unread={
+                !!unreadByProject[project.id] ||
+                Object.values(unreadByStack).some((e) => e.projectId === project.id) ||
+                Object.values(unreadByEnvironment).some((e) => e.projectId === project.id) ||
+                Object.values(unreadByEnvPin).some((e) => e.projectId === project.id) ||
+                Object.values(unreadByStackPin).some((e) => e.projectId === project.id)
+              }
               isDragOver={dragOverProjectId === project.id}
               onClick={() => handleClick(project)}
               onContextMenu={(e) => handleProjectContextMenu(e, project)}

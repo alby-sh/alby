@@ -29,6 +29,16 @@ let agentManager: AgentManager
 let routineManager: RoutineManager
 let connectionPool: ConnectionPool
 
+// In dev, point userData at a sibling directory so the packaged Alby and the
+// dev instance don't share the same SQLite file, Reverb handshake state, or
+// preferences. Sharing had two failure modes: (1) WAL-lock contention when
+// both processes ran the agents table migration, and (2) settings written
+// by one overriding the other at write time. Must run before app.whenReady.
+if (process.defaultApp) {
+  const { join } = require('path') as typeof import('path')
+  app.setPath('userData', join(app.getPath('appData'), 'Alby Dev'))
+}
+
 // Deep-link queue — filled before the renderer (or the window itself) exists,
 // drained as soon as the renderer signals it's ready via `deep-link:ready`.
 // Covers three cold-start paths: macOS `open-url`, Windows/Linux argv on first
@@ -123,9 +133,57 @@ function createWindow(): void {
 
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+      .catch((err) => console.error('[main] loadURL failed:', err))
   } else {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+      .catch((err) => console.error('[main] loadFile failed:', err))
   }
+
+  // Surface load failures loudly — with vibrancy: 'under-window' a window
+  // that hasn't painted content yet is effectively transparent, so a silent
+  // dev-server miss looks like "Electron opens but the window is invisible".
+  mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
+    console.error(`[main] did-fail-load code=${code} desc="${desc}" url=${url}`)
+  })
+
+  // Center + clamp the window into the currently-focused display on show.
+  // Without this, macOS may restore bounds from a previous session on a
+  // monitor that's no longer connected, leaving Electron alive with an
+  // invisible window.
+  const centerIfOffscreen = (): void => {
+    if (!mainWindow) return
+    // Lazy-require `screen` — the module needs app.whenReady().
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { screen } = require('electron') as typeof import('electron')
+    const bounds = mainWindow.getBounds()
+    const activeDisplay = screen.getDisplayNearestPoint(screen.getCursorScreenPoint())
+    const work = activeDisplay.workArea
+    const isOnScreen =
+      bounds.x + bounds.width > work.x &&
+      bounds.x < work.x + work.width &&
+      bounds.y + bounds.height > work.y &&
+      bounds.y < work.y + work.height
+    if (!isOnScreen) mainWindow.center()
+    console.log('[main] window shown; on-screen=', isOnScreen, 'bounds=', mainWindow.getBounds())
+  }
+
+  mainWindow.once('ready-to-show', () => {
+    centerIfOffscreen()
+    mainWindow?.show()
+    mainWindow?.focus()
+  })
+
+  // Fallback: if ready-to-show never fires within 3 s (vite dev server slow
+  // to respond, network stall, etc.), force the window visible so the user
+  // at least sees a blank vibrancy pane + can inspect the console.
+  setTimeout(() => {
+    if (mainWindow && !mainWindow.isVisible()) {
+      console.warn('[main] ready-to-show never fired in 3s — forcing show')
+      centerIfOffscreen()
+      mainWindow.show()
+      mainWindow.focus()
+    }
+  }, 3000)
 }
 
 // Single-instance lock — required for deep links on Windows/Linux, where a
@@ -133,7 +191,11 @@ function createWindow(): void {
 // URL into the already-running one. On macOS the OS delivers URLs via the
 // `open-url` event without a second process, but the lock is still safe
 // (harmless no-op).
-const gotSingleInstanceLock = app.requestSingleInstanceLock()
+//
+// Skip in dev so `npm run dev` can start with a packaged Alby already
+// running from /Applications — otherwise the lock that the packaged app
+// holds makes dev exit silently at launch with no visible error.
+const gotSingleInstanceLock = process.defaultApp ? true : app.requestSingleInstanceLock()
 if (!gotSingleInstanceLock) {
   app.quit()
 } else {
@@ -191,10 +253,19 @@ app.whenReady().then(() => {
   // session only exists then.
   installCertPinning()
 
-  const db = initDatabase()
-  // Backfill the protected "general" task for environments created before this
-  // concept existed — so every env now has a safe default launch target.
-  new ProjectsRepo(db).ensureGeneralTaskForAllEnvironments()
+  // Wrap DB init in a try/catch so a native-module arch mismatch (happens
+  // when `npm run package` for x64 rebuilds better-sqlite3 as x86_64 and
+  // overwrites the arm64 build used by dev) surfaces in the terminal
+  // instead of silently leaving Electron alive with no window.
+  let db: ReturnType<typeof initDatabase>
+  try {
+    db = initDatabase()
+    new ProjectsRepo(db).ensureGeneralTaskForAllEnvironments()
+  } catch (err) {
+    console.error('[main] DB init failed:', (err as Error).stack ?? (err as Error).message)
+    console.error('[main] Likely an arch-mismatched native module. Run `npx electron-rebuild`.')
+    throw err
+  }
   connectionPool = new ConnectionPool()
   agentManager = new AgentManager(db, connectionPool)
   routineManager = new RoutineManager(db, connectionPool)
@@ -219,6 +290,31 @@ app.whenReady().then(() => {
   ipcMain.handle('app:focus', () => {
     focusMainWindow()
   })
+
+  // Broadcast auth proxy. In packaged builds the renderer can POST to
+  // https://alby.sh/broadcasting/auth directly because the origin is
+  // `file://` / `alby://` (no CORS check). In dev the origin is
+  // http://localhost:5173 and Laravel's CORS config doesn't allow it, so
+  // the fetch fails with "No Access-Control-Allow-Origin header". Routing
+  // through the main process sidesteps the browser's CORS check entirely —
+  // main-process fetch is a Node HTTP client, not a Chromium fetch.
+  ipcMain.handle(
+    'broadcast:authorize',
+    async (_e, { token, socketId, channelName }: { token: string; socketId: string; channelName: string }) => {
+      const { BROADCASTING_AUTH_URL } = await import('../shared/cloud-constants')
+      const res = await fetch(BROADCASTING_AUTH_URL, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Authorization: `Bearer ${token}`,
+        },
+        body: new URLSearchParams({ socket_id: socketId, channel_name: channelName }).toString(),
+      })
+      if (!res.ok) throw new Error(`auth ${res.status}`)
+      return (await res.json()) as Record<string, unknown>
+    },
+  )
 
   // Renderer handshake: once the app-level listener is mounted it calls this
   // to drain any URLs that arrived before it was listening (cold start on

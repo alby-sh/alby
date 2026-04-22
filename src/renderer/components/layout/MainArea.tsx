@@ -221,6 +221,17 @@ export function MainArea() {
       if (agents.length === 0) return []
 
       if (prev.length === 0 || !prev.some((id) => ids.has(id))) {
+        // No valid panes — if the user has an activeAgentId that belongs to
+        // the new task list, show THAT agent. This matters when they click
+        // a session in the sidebar: selectedTaskId changes, agents refetches,
+        // and without this fallback we'd drop them onto agents[0] instead
+        // of the session they actually clicked. We read via getState() to
+        // avoid adding activeAgentId as a dep (render-storm risk).
+        const currentActive = useAppStore.getState().activeAgentId
+        if (currentActive && ids.has(currentActive)) {
+          return [currentActive]
+        }
+
         // No valid panes — check if we have a saved layout for this task
         const taskId = agents[0]?.task_id
         if (taskId) {
@@ -242,6 +253,27 @@ export function MainArea() {
       return [agents[0].id]
     })
   }, [agents, setActiveAgent, getPaneLayout])
+
+  // Clicking a session in the *sidebar* only sets activeAgentId — it doesn't
+  // go through handleSelectAgent (which lives in the tab bar). Without this
+  // effect, activeAgentId would change but the visible pane would stay on
+  // whatever it was before, so the user keeps seeing the wrong terminal.
+  // The guard (`panes.length === 0 || !panes.includes(activeAgentId)`) makes
+  // the effect idempotent — it only fires when the active agent isn't
+  // already in the current pane group, so it doesn't fight with manual
+  // split selections or create a render loop.
+  useEffect(() => {
+    if (!activeAgentId || !agents) return
+    if (activeAgentId === LAUNCHER_TAB_ID) return
+    if (!agents.some((a) => a.id === activeAgentId)) return
+    if (panes.includes(activeAgentId)) return
+    if (panes.length > 1 && selectedTaskId) {
+      savePaneLayout(selectedTaskId, { panes: [...panes], sizes: [...paneSizes] })
+    }
+    setPanes([activeAgentId])
+    setPaneSizes([100])
+    setActivePaneIndex(0)
+  }, [activeAgentId, agents, panes, paneSizes, selectedTaskId, savePaneLayout])
 
   // Keep paneSizes in sync with panes count — only update when count actually changes
   const panesCount = panes.length

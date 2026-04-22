@@ -78,10 +78,24 @@ function resolveRoutineScope(qc: QueryClient, routineId: string): Partial<Unread
 }
 
 function resolveIssueScope(qc: QueryClient, appId: string, projectId: string): Partial<UnreadScope> {
+  // Issues are stack-level in the UI (the "Issues" pin lives alongside
+  // Overview / Tasks under each stack header), so we deliberately do NOT
+  // mark the environment dot — it would give the user a false signal that
+  // the env itself has something to look at (e.g. an agent finished),
+  // which isn't the case. We do mark the stack (for the collapsed-header
+  // rollup) and the `stackPin` for the Issues row itself.
+  const scope: Partial<UnreadScope> = { projectId }
   const apps = qc.getQueryData<ReportingApp[]>(['apps', projectId])
   const app = apps?.find((a) => a.id === appId)
   const envId = app?.environment_id ?? undefined
-  return envBoundScope(qc, projectId, envId)
+  if (envId) {
+    const env = findEnv(qc, envId)
+    if (env?.stack_id) {
+      scope.stackId = env.stack_id
+      scope.stackPin = { stackId: env.stack_id, pinKey: 'issues' }
+    }
+  }
+  return scope
 }
 
 /** Common rollup: given projectId + optional envId, resolve stack via envs. */
@@ -129,11 +143,10 @@ import {
   REVERB_HOST,
   REVERB_PORT,
   REVERB_SCHEME,
-  BROADCASTING_AUTH_URL,
 } from '../../shared/cloud-constants'
 
 type EntityType = 'project' | 'environment' | 'task' | 'agent' | 'routine' | 'team' | 'member' | 'issue'
-type Action = 'created' | 'updated' | 'deleted' | 'reordered'
+type Action = 'created' | 'updated' | 'deleted' | 'reordered' | 'idle'
 
 interface EntityChangedPayload {
   entity: EntityType
@@ -147,6 +160,13 @@ interface SyncState {
   _pusher: Pusher | null
   _channels: Map<string, Channel>
   _qc: QueryClient | null
+  /** Project / team IDs the renderer asked to subscribe to BEFORE pusher had
+   *  finished handshake. Drained as soon as `_pusher` is created. Without
+   *  this queue, the subscribe() call silently no-ops and the user stops
+   *  receiving issue / agent events on a page reload where `useAllProjects`
+   *  resolves before `useSyncBootstrap`'s auth.current() completes. */
+  _pendingProjects: Set<string>
+  _pendingTeams: Set<string>
   attach: (qc: QueryClient) => void
   subscribeUser: (userId: number) => void
   subscribeTeams: (teamIds: string[]) => void
@@ -159,17 +179,17 @@ export const useSyncStore = create<SyncState>((set, get) => ({
   _pusher: null,
   _channels: new Map(),
   _qc: null,
+  _pendingProjects: new Set(),
+  _pendingTeams: new Set(),
 
   attach: (qc) => set({ _qc: qc }),
 
   subscribeUser: (userId: number) => {
-    const state = get()
-
     // Grab the current Sanctum token so the authorizer can sign channel auth.
     window.electronAPI.auth.current().then((data) => {
       if (!data?.token) return
 
-      let pusher = state._pusher
+      let pusher = get()._pusher
       if (!pusher) {
         pusher = new Pusher(REVERB_KEY, {
           wsHost: REVERB_HOST,
@@ -179,21 +199,16 @@ export const useSyncStore = create<SyncState>((set, get) => ({
           enabledTransports: ['ws', 'wss'],
           cluster: 'mt1', // required by pusher-js but ignored by Reverb
           authorizer: (channel) => ({
+            // Route every Pusher channel-auth POST through the main process
+            // so Chromium's CORS check on the dev origin (http://localhost:5173)
+            // doesn't strangle the handshake — Laravel's /broadcasting/auth
+            // only whitelists the packaged app's origin. In packaged builds
+            // this is an IPC hop we could skip, but routing through main is
+            // free (main uses Node fetch) and keeps one code path for both.
             authorize: (socketId, callback) => {
-              fetch(BROADCASTING_AUTH_URL, {
-                method: 'POST',
-                headers: {
-                  Accept: 'application/json',
-                  'Content-Type': 'application/x-www-form-urlencoded',
-                  Authorization: `Bearer ${data.token}`,
-                },
-                body: new URLSearchParams({ socket_id: socketId, channel_name: channel.name }).toString(),
-              })
-                .then(async (res) => {
-                  if (!res.ok) throw new Error(`auth ${res.status}`)
-                  const authData = await res.json()
-                  callback(null, authData)
-                })
+              window.electronAPI.broadcast
+                .authorize(data.token, socketId, channel.name)
+                .then((authData) => callback(null, authData as unknown as { auth: string }))
                 .catch((err) => callback(err as Error, null as unknown as { auth: string }))
             },
           }),
@@ -204,6 +219,12 @@ export const useSyncStore = create<SyncState>((set, get) => ({
         pusher.connection.bind('error', (err: unknown) => { console.warn('[sync] error:', err) })
 
         set({ _pusher: pusher })
+
+        // Drain any subscribe calls that arrived before pusher existed.
+        const pending = get()
+        pending._pendingTeams.forEach((id) => subscribeOnce(get, set, pusher!, `private-team.${id}`))
+        pending._pendingProjects.forEach((id) => subscribeOnce(get, set, pusher!, `private-project.${id}`))
+        set({ _pendingTeams: new Set(), _pendingProjects: new Set() })
       }
 
       subscribeOnce(get, set, pusher, `private-user.${userId}`)
@@ -212,13 +233,24 @@ export const useSyncStore = create<SyncState>((set, get) => ({
 
   subscribeTeams: (teamIds) => {
     const pusher = get()._pusher
-    if (!pusher) return
+    if (!pusher) {
+      // Queue for the drain that happens once subscribeUser creates pusher.
+      const next = new Set(get()._pendingTeams)
+      teamIds.forEach((id) => next.add(id))
+      set({ _pendingTeams: next })
+      return
+    }
     teamIds.forEach((id) => subscribeOnce(get, set, pusher, `private-team.${id}`))
   },
 
   subscribeProjects: (projectIds) => {
     const pusher = get()._pusher
-    if (!pusher) return
+    if (!pusher) {
+      const next = new Set(get()._pendingProjects)
+      projectIds.forEach((id) => next.add(id))
+      set({ _pendingProjects: next })
+      return
+    }
     projectIds.forEach((id) => subscribeOnce(get, set, pusher, `private-project.${id}`))
   },
 
@@ -226,7 +258,13 @@ export const useSyncStore = create<SyncState>((set, get) => ({
     const { _pusher, _channels } = get()
     _channels.forEach((c) => { try { c.unbind_all(); _pusher?.unsubscribe(c.name) } catch { /* ignore */ } })
     _pusher?.disconnect()
-    set({ _pusher: null, _channels: new Map(), connected: false })
+    set({
+      _pusher: null,
+      _channels: new Map(),
+      _pendingTeams: new Set(),
+      _pendingProjects: new Set(),
+      connected: false,
+    })
   },
 }))
 
@@ -290,11 +328,18 @@ function handleIssueLive(
   qc.invalidateQueries({ queryKey: ['issue', payload.issue_id] })
   qc.invalidateQueries({ queryKey: ['issues-open-counts'] })
 
-  // Desktop notification for NEW issues + regressions — not for every follow-up
-  // event of the same issue, which would be noisy on a broken prod deploy.
-  // Gated on the user's per-app `channels.push` preference, read from the
-  // "my subscriptions" cache (populated on boot via useMyNotificationSubs).
-  if (name === 'issue.created' || name === 'issue.regression') {
+  // Desktop notification + unread-marker. We act on three event kinds:
+  //  - issue.created    → trigger 'new_issue'
+  //  - issue.regression → trigger 'regression'
+  //  - issue.new_event  → trigger 'every_event' (per-occurrence, opt-in)
+  // The push gate reads the user's per-app `channels.push` AND requires the
+  // matching trigger to be enabled — a user subscribed only to 'new_issue'
+  // won't get a push for every subsequent occurrence.
+  if (
+    name === 'issue.created' ||
+    name === 'issue.regression' ||
+    name === 'issue.new_event'
+  ) {
     const pushEnabled = isPushEnabledForApp(qc, payload.app_id, name)
     if (pushEnabled) notifyIssue(name, payload)
     markUnreadIfAway(
@@ -306,19 +351,22 @@ function handleIssueLive(
   }
 }
 
-/** Look up the current user's push preference for a given app + trigger.
+/** Look up the current user's push preference for a given app + event name.
  *  Returns false if we don't have the sub cache yet (safe default — we'd
  *  rather miss a notification than spam the user on boot). */
 function isPushEnabledForApp(qc: QueryClient, appId: string, eventName: string): boolean {
   const mine = qc.getQueryData<Array<{
     app_id: string
-    triggers: Array<'new_issue' | 'regression'>
+    triggers: Array<'new_issue' | 'regression' | 'every_event'>
     channels?: { push?: boolean }
   }>>(['notification-subs-mine'])
   if (!mine) return false
   const sub = mine.find((s) => s.app_id === appId)
   if (!sub?.channels?.push) return false
-  const trigger = eventName === 'issue.regression' ? 'regression' : 'new_issue'
+  const trigger: 'new_issue' | 'regression' | 'every_event' =
+    eventName === 'issue.regression' ? 'regression'
+      : eventName === 'issue.new_event' ? 'every_event'
+        : 'new_issue'
   return sub.triggers.includes(trigger)
 }
 
@@ -337,17 +385,25 @@ function isPushEnabledForApp(qc: QueryClient, appId: string, eventName: string):
 // user is looking at Alby.
 function notifyIssue(name: string, payload: IssueLivePayload): void {
   const title =
-    name === 'issue.regression'
-      ? 'Alby · Issue regressed'
-      : 'Alby · New issue'
+    name === 'issue.regression' ? 'Alby · Issue regressed'
+      : name === 'issue.new_event' ? 'Alby · New occurrence'
+        : 'Alby · New issue'
   const levelTag =
     payload.level && payload.level !== 'error' ? ` [${payload.level.toUpperCase()}]` : ''
   const body = (payload.title ?? 'Unknown issue') + levelTag
+  // A per-occurrence push should replace the previous one for the same
+  // issue (so Notification Center doesn't stack hundreds of them from a
+  // noisy prod deploy), but for new_issue / regression we use a stable
+  // tag so they collapse per issue too.
+  const tag =
+    name === 'issue.new_event'
+      ? `alby-issue-${payload.issue_id}-events`
+      : `alby-issue-${payload.issue_id}`
   try {
     const api = (window as unknown as {
       electronAPI?: { notifications?: { issue?: (p: { title: string; body: string; tag?: string }) => void } }
     }).electronAPI
-    api?.notifications?.issue?.({ title, body, tag: `alby-issue-${payload.issue_id}` })
+    api?.notifications?.issue?.({ title, body, tag })
   } catch (err) {
     console.warn('[sync] notification failed:', err)
   }
@@ -419,6 +475,22 @@ function handleEntityChanged(
         return base
       })
     }
+  }
+  // Cross-device "agent just finished a turn" signal. The pty-owning device
+  // POSTs to /api/agents/{id}/idle when Claude / Gemini / Codex flips
+  // working→idle; every other device receives it here and drops a dot in
+  // the sidebar so the user knows output is waiting without having to
+  // check the active machine. The originating device also receives its
+  // own broadcast but `markUnreadIfAway` skips the env dot if the user is
+  // already looking at the env, so no false positive.
+  if (payload.entity === 'agent' && payload.action === 'idle') {
+    markUnreadIfAway(qc, projectId, 'agent.activity', (qc) => {
+      const base = resolveAgentScope(qc, payload.id)
+      if (base.environmentId) {
+        base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
+      }
+      return base
+    })
   }
   if (payload.entity === 'routine' && payload.action === 'updated') {
     markUnreadIfAway(qc, projectId, 'routine.finished', (qc) => {

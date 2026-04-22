@@ -368,6 +368,12 @@ const api = {
     delete: (id: string) => ipcRenderer.invoke('webhooks:delete', id),
     rotateSecret: (id: string) => ipcRenderer.invoke('webhooks:rotate-secret', id),
   },
+  broadcast: {
+    /** Proxy the /broadcasting/auth POST through main so the browser's CORS
+     *  check on localhost dev origins doesn't block Reverb channel auth. */
+    authorize: (token: string, socketId: string, channelName: string) =>
+      ipcRenderer.invoke('broadcast:authorize', { token, socketId, channelName }),
+  },
   notificationSubs: {
     list: (appId: string) => ipcRenderer.invoke('notification-subs:list', appId),
     listMine: () => ipcRenderer.invoke('notification-subs:list-mine'),

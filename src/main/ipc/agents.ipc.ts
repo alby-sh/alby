@@ -35,35 +35,61 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   }
 
   ipcMain.handle('agents:list', async (event, taskId: string) => {
-    // Try cloud first so cross-device agents show up; fall back to local if offline.
+    // Merge cloud + local. The cloud is authoritative for cross-device
+    // (remote) sessions, but local-only sessions never get pushed up there
+    // (agents:spawn skips the cloud write when the env is local) so a pure
+    // cloud-returning behaviour would hide the tabs of any local session
+    // the user just opened. We therefore:
+    //   1. Fetch cloud agents (if authenticated) and upsert them locally.
+    //   2. Return `repo.list(taskId)` — this is now the union of cloud-
+    //      originated rows (just mirrored) and locally-spawned rows that
+    //      never left this device.
+    // Offline / unauthenticated users skip step 1 and just get local.
     if (await loadToken()) {
       try {
-        const agents = await cloudClient.listAgents(taskId)
-        // Best-effort mirror — ensures the next local read is coherent.
-        agents.forEach((a) => { try { repo.upsertFromCloud(a) } catch { /* ignore */ } })
+        const cloudAgents = await cloudClient.listAgents(taskId)
+        cloudAgents.forEach((a) => { try { repo.upsertFromCloud(a) } catch { /* ignore */ } })
         // Lazy reattach: if a cloud-side running agent has no live runner on
         // this device (fresh install, long idle, cross-device session), spin
         // up a RemoteAgent + SSH+tmux attach in the background so the tab
         // isn't empty when the user clicks it.
         const win = BrowserWindow.fromWebContents(event.sender)
         if (win) {
-          for (const a of agents) {
+          for (const a of cloudAgents) {
             if (a.status === 'running') {
               agentManager.ensureAttached(a.id, win).catch(() => { /* ignore */ })
             }
           }
         }
-        return agents
       } catch (err) {
-        console.warn('[agents:list] cloud failed, falling back to local:', (err as Error).message)
+        console.warn('[agents:list] cloud fetch failed, serving local-only:', (err as Error).message)
       }
     }
     return repo.list(taskId)
   })
 
-  ipcMain.handle('agents:list-all', () => {
-    // Polled every 15s by the renderer — keep it local for speed. The renderer
-    // will see cross-device agents after any per-task listing refresh.
+  ipcMain.handle('agents:list-all', async () => {
+    // Pull the set of RUNNING agents from the cloud and mirror them into
+    // local SQLite. This is what makes a session started on one device
+    // show up on another: without this, the sidebar's `useAllAgents` was
+    // happy to serve a stale local list forever because the per-task
+    // `agents:list` only runs when the user opens that task.
+    //
+    // We intentionally don't try to sync every completed/errored agent
+    // ever recorded — that would grow unboundedly. Terminal states are
+    // delivered via `entity.changed` broadcasts (agent/updated with
+    // status=completed|error) and the per-task `agents:list` handler
+    // on actual navigation.
+    if (await loadToken()) {
+      try {
+        const running = await cloudClient.listAllRunningAgents()
+        for (const a of running) {
+          try { repo.upsertFromCloud(a) } catch { /* ignore */ }
+        }
+      } catch (err) {
+        console.warn('[agents:list-all] cloud sync failed, serving local:', (err as Error).message)
+      }
+    }
     return repo.listAll()
   })
 
@@ -89,15 +115,24 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
       if (!win) throw new Error('No window found')
       const agent = await agentManager.spawn(taskId, win, agentType || 'claude', !!autoInstall, initialPrompt)
       console.log('[agents:spawn] success, agentId:', agent.id)
-      // Mirror to cloud with the same id so other devices see this agent.
-      // Awaited so the list refetch immediately after spawn sees the new agent.
-      await cloudWrite(cloudClient.createAgent(taskId, {
-        id: agent.id,
-        tab_name: agent.tab_name ?? undefined,
-        agent_type: agentType || 'claude',
-        prompt: agent.prompt ?? undefined,
-        status: agent.status,
-      }))
+      // Mirror to cloud ONLY when the agent runs on a remote env — its pty
+      // lives on an SSH+tmux session the other devices can attach to. Local
+      // agents are device-bound (the pty is on this machine), so syncing
+      // them would give other clients an "attachable" tab that they can't
+      // actually reach. Local agents therefore live only in this device's
+      // SQLite. Awaited so the list refetch immediately after spawn sees
+      // the new agent on remote.
+      const taskData = projectsRepo.getTaskWithEnvironment(taskId)
+      const isRemote = taskData?.environment.execution_mode === 'remote'
+      if (isRemote) {
+        await cloudWrite(cloudClient.createAgent(taskId, {
+          id: agent.id,
+          tab_name: agent.tab_name ?? undefined,
+          agent_type: agentType || 'claude',
+          prompt: agent.prompt ?? undefined,
+          status: agent.status,
+        }))
+      }
       return agent
     } catch (err) {
       console.error('[agents:spawn] error:', err)

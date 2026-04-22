@@ -507,6 +507,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setStackTab: (stackId, tab) => {
     set((state) => ({ stackTabs: { ...state.stackTabs, [stackId]: tab } }))
+    // Clicking a stack pin (Overview / Issues / Tasks / Settings) clears its
+    // unread dot — same pattern as setEnvTab.
+    import('./unread-store').then(({ useUnreadStore }) => {
+      useUnreadStore.getState().clear({ stackPin: { stackId, pinKey: tab } })
+    }).catch(() => { /* ignore */ })
     save(get())
   },
   setEnvTab: (envId, tab) => {

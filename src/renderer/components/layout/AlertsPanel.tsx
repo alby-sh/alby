@@ -9,7 +9,7 @@ import type {
   UserSlackWebhook,
 } from '../../../shared/types'
 
-type Trigger = 'new_issue' | 'regression'
+type Trigger = 'new_issue' | 'regression' | 'every_event'
 
 interface TeamDetail {
   id: string
@@ -187,7 +187,7 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
       <div className="rounded-md border border-neutral-800 divide-y divide-neutral-900 overflow-hidden">
         <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-neutral-500 bg-neutral-950">
           <div>Member</div>
-          <div className="w-24 text-center">Triggers</div>
+          <div className="w-36 text-center" title="When to notify — new = first time this fingerprint is seen; regr. = a resolved issue started firing again; every = each individual occurrence (noisy).">Triggers</div>
           <div className="w-20 text-center">Email</div>
           <div className="w-20 text-center">Slack</div>
           <div className="w-20 text-center" title="Native desktop notification in Alby. Each user controls their own.">Push</div>
@@ -217,6 +217,7 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
             <div
               key={m.id}
               className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-3 items-center"
+              data-alerts-row={m.id}
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Avatar name={m.name} url={m.avatar_url} />
@@ -233,7 +234,7 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
                 </div>
               </div>
 
-              <div className="w-24 flex items-center justify-center gap-1">
+              <div className="w-36 flex items-center justify-center gap-1">
                 <TriggerToggle
                   label="new"
                   active={triggers.has('new_issue')}
@@ -245,6 +246,12 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
                   active={triggers.has('regression')}
                   disabled={!editable}
                   onChange={(v) => toggleTrigger(m.id, 'regression', v)}
+                />
+                <TriggerToggle
+                  label="every"
+                  active={triggers.has('every_event')}
+                  disabled={!editable}
+                  onChange={(v) => toggleTrigger(m.id, 'every_event', v)}
                 />
               </div>
 

@@ -502,7 +502,11 @@ export interface WebhookConfig {
 export interface NotificationSubscription {
   app_id: string
   user_id: number
-  triggers: Array<'new_issue' | 'regression'>
+  /** - `new_issue`: first time a given fingerprint is seen on this app.
+   *  - `regression`: a resolved issue started firing again.
+   *  - `every_event`: every subsequent occurrence of an existing issue —
+   *    deliberately noisy, opt-in only. */
+  triggers: Array<'new_issue' | 'regression' | 'every_event'>
   /** Per-channel delivery flags. Missing → treat as email-only (backward compat).
    *  `push` is handled entirely by the Alby desktop client: the server just
    *  stores the preference so it syncs across a user's devices. */
@@ -566,7 +570,7 @@ export interface UpdateWebhookDTO {
 
 export interface UpsertNotificationSubDTO {
   user_id?: number
-  triggers: Array<'new_issue' | 'regression'>
+  triggers: Array<'new_issue' | 'regression' | 'every_event'>
   channels?: { email?: boolean; slack?: boolean; push?: boolean }
 }
 

@@ -284,6 +284,16 @@ export class RemoteAgent extends EventEmitter {
             agentId: this.agentId,
             activity: 'idle'
           })
+          // Broadcast to the project channel so every other device running
+          // Alby with the same account sees a red dot on this agent — user
+          // asked for cross-device "my agent just finished" awareness.
+          // Fire-and-forget — main-process fetch via cloudClient bypasses
+          // renderer CORS.
+          import('../cloud/cloud-client').then(({ cloudClient }) => {
+            cloudClient.signalAgentIdle(this.agentId).catch((err) => {
+              console.warn('[RemoteAgent] signalAgentIdle failed:', (err as Error).message)
+            })
+          }).catch(() => { /* ignore */ })
         }, 1500)
       } else {
         this.currentActivity = newActivity

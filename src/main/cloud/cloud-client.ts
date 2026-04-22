@@ -215,6 +215,13 @@ export const cloudClient = {
   heartbeatAgent(id: string, deltas: { working_delta?: number; viewed_delta?: number }): Promise<void> {
     return request('POST', `/api/agents/${id}/heartbeat`, deltas)
   },
+  /** Signal to everyone else on the project channel that this agent just
+   *  finished a turn (working → idle). Broadcast-only — the server doesn't
+   *  persist an "activity" column, it just fans out an event that other
+   *  clients use to put a red dot in the sidebar. */
+  signalAgentIdle(id: string): Promise<void> {
+    return request('POST', `/api/agents/${id}/idle`)
+  },
   deleteAgent(id: string): Promise<void> {
     return request('DELETE', `/api/agents/${id}`)
   },

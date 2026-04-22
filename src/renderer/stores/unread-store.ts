@@ -39,6 +39,7 @@ interface UnreadEntry {
 }
 
 export type EnvPinKey = 'sessions' | 'terminals' | 'routines' | 'files' | 'github' | 'deploy' | 'settings'
+export type StackPinKey = 'overview' | 'issues' | 'tasks' | 'settings'
 
 export interface UnreadScope {
   projectId?: string
@@ -46,13 +47,29 @@ export interface UnreadScope {
   environmentId?: string
   /** Key like `${envId}::${pinKey}` — marks a pin row inside a specific env. */
   envPin?: { environmentId: string; pinKey: EnvPinKey }
+  /** Key like `${stackId}::${pinKey}` — marks a pin row inside a specific stack.
+   *  Used for Issues (which is stack-level, not env-level) and Tasks. */
+  stackPin?: { stackId: string; pinKey: StackPinKey }
+}
+
+interface UnreadEntryWithContext extends UnreadEntry {
+  /** Denormalized parent chain so project-level rollups don't need to walk
+   *  the env/stack tree at read time. Set when the caller has the info (all
+   *  issue/agent/routine events do); left undefined for orphan entries. */
+  projectId?: string
+  stackId?: string
 }
 
 interface PersistedState {
-  byProject: Record<string, UnreadEntry>
-  byStack: Record<string, UnreadEntry>
-  byEnvironment: Record<string, UnreadEntry>
-  byEnvPin: Record<string, UnreadEntry>
+  /** Kept for events that truly only apply at the project level (rare —
+   *  most events roll up into stacks / envs / pins). Never auto-cleared by
+   *  navigation; project dot visibility is computed as `byProject[id] OR
+   *  any sub-scope entry whose projectId === id`. */
+  byProject: Record<string, UnreadEntryWithContext>
+  byStack: Record<string, UnreadEntryWithContext>
+  byEnvironment: Record<string, UnreadEntryWithContext>
+  byEnvPin: Record<string, UnreadEntryWithContext>
+  byStackPin: Record<string, UnreadEntryWithContext>
 }
 
 interface UnreadState extends PersistedState {
@@ -63,6 +80,7 @@ interface UnreadState extends PersistedState {
   hasStack: (stackId: string) => boolean
   hasEnvironment: (environmentId: string) => boolean
   hasEnvPin: (environmentId: string, pinKey: EnvPinKey) => boolean
+  hasStackPin: (stackId: string, pinKey: StackPinKey) => boolean
 }
 
 const STORAGE_KEY = 'alby:unread-activity-v2'
@@ -102,14 +120,15 @@ function loadAll(): PersistedState {
         byStack: loadRecord(JSON.stringify(parsed.byStack ?? {})),
         byEnvironment: loadRecord(JSON.stringify(parsed.byEnvironment ?? {})),
         byEnvPin: loadRecord(JSON.stringify(parsed.byEnvPin ?? {})),
+        byStackPin: loadRecord(JSON.stringify(parsed.byStackPin ?? {})),
       }
     }
     // Migrate from v1 (project-only schema) so existing users don't lose
     // their pending unread state on the first app boot after the upgrade.
     const legacy = loadRecord(localStorage.getItem(LEGACY_KEY))
-    return { byProject: legacy, byStack: {}, byEnvironment: {}, byEnvPin: {} }
+    return { byProject: legacy, byStack: {}, byEnvironment: {}, byEnvPin: {}, byStackPin: {} }
   } catch {
-    return { byProject: {}, byStack: {}, byEnvironment: {}, byEnvPin: {} }
+    return { byProject: {}, byStack: {}, byEnvironment: {}, byEnvPin: {}, byStackPin: {} }
   }
 }
 
@@ -119,9 +138,18 @@ function save(state: PersistedState): void {
   } catch { /* quota exhaustion / private mode — not fatal */ }
 }
 
-function bumpEntry(prev: UnreadEntry | undefined, reason: UnreadReason): UnreadEntry {
+function bumpEntry(
+  prev: UnreadEntryWithContext | undefined,
+  reason: UnreadReason,
+  context: { projectId?: string; stackId?: string } = {},
+): UnreadEntryWithContext {
   const nextReasons = [reason, ...(prev?.reasons ?? []).filter((r) => r !== reason)].slice(0, 10)
-  return { at: Date.now(), reasons: nextReasons }
+  return {
+    at: Date.now(),
+    reasons: nextReasons,
+    projectId: context.projectId ?? prev?.projectId,
+    stackId: context.stackId ?? prev?.stackId,
+  }
 }
 
 export const useUnreadStore = create<UnreadState>((set, get) => ({
@@ -134,23 +162,48 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         byStack: s.byStack,
         byEnvironment: s.byEnvironment,
         byEnvPin: s.byEnvPin,
+        byStackPin: s.byStackPin,
       }
       let dirty = false
+      const ctx = {
+        projectId: scope.projectId,
+        stackId: scope.stackId ?? scope.stackPin?.stackId,
+      }
       if (scope.projectId) {
-        next.byProject = { ...s.byProject, [scope.projectId]: bumpEntry(s.byProject[scope.projectId], reason) }
+        next.byProject = {
+          ...s.byProject,
+          [scope.projectId]: bumpEntry(s.byProject[scope.projectId], reason, ctx),
+        }
         dirty = true
       }
       if (scope.stackId) {
-        next.byStack = { ...s.byStack, [scope.stackId]: bumpEntry(s.byStack[scope.stackId], reason) }
+        next.byStack = {
+          ...s.byStack,
+          [scope.stackId]: bumpEntry(s.byStack[scope.stackId], reason, ctx),
+        }
         dirty = true
       }
       if (scope.environmentId) {
-        next.byEnvironment = { ...s.byEnvironment, [scope.environmentId]: bumpEntry(s.byEnvironment[scope.environmentId], reason) }
+        next.byEnvironment = {
+          ...s.byEnvironment,
+          [scope.environmentId]: bumpEntry(s.byEnvironment[scope.environmentId], reason, ctx),
+        }
         dirty = true
       }
       if (scope.envPin) {
         const key = `${scope.envPin.environmentId}::${scope.envPin.pinKey}`
-        next.byEnvPin = { ...s.byEnvPin, [key]: bumpEntry(s.byEnvPin[key], reason) }
+        next.byEnvPin = {
+          ...s.byEnvPin,
+          [key]: bumpEntry(s.byEnvPin[key], reason, ctx),
+        }
+        dirty = true
+      }
+      if (scope.stackPin) {
+        const key = `${scope.stackPin.stackId}::${scope.stackPin.pinKey}`
+        next.byStackPin = {
+          ...s.byStackPin,
+          [key]: bumpEntry(s.byStackPin[key], reason, ctx),
+        }
         dirty = true
       }
       if (!dirty) return s
@@ -166,6 +219,7 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         byStack: s.byStack,
         byEnvironment: s.byEnvironment,
         byEnvPin: s.byEnvPin,
+        byStackPin: s.byStackPin,
       }
       let dirty = false
       if (scope.projectId && s.byProject[scope.projectId]) {
@@ -195,6 +249,15 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
           dirty = true
         }
       }
+      if (scope.stackPin) {
+        const key = `${scope.stackPin.stackId}::${scope.stackPin.pinKey}`
+        if (s.byStackPin[key]) {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const { [key]: _drop, ...rest } = s.byStackPin
+          next.byStackPin = rest
+          dirty = true
+        }
+      }
       if (!dirty) return s
       save(next)
       return next
@@ -202,13 +265,24 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
   },
 
   clearAll: () => {
-    const empty: PersistedState = { byProject: {}, byStack: {}, byEnvironment: {}, byEnvPin: {} }
+    const empty: PersistedState = { byProject: {}, byStack: {}, byEnvironment: {}, byEnvPin: {}, byStackPin: {} }
     save(empty)
     set(empty)
   },
 
-  hasProject: (id) => !!get().byProject[id],
+  /** Project has unread if EITHER a direct project-level entry exists OR any
+   *  sub-scope entry (stack / env / pin) denormalized a matching projectId.
+   *  The rollup is what makes the primary-sidebar dot stay lit until every
+   *  dot inside the secondary sidebar has been acknowledged. */
+  hasProject: (id) => {
+    const s = get()
+    if (s.byProject[id]) return true
+    const scan = (rec: Record<string, UnreadEntryWithContext>): boolean =>
+      Object.values(rec).some((e) => e.projectId === id)
+    return scan(s.byStack) || scan(s.byEnvironment) || scan(s.byEnvPin) || scan(s.byStackPin)
+  },
   hasStack: (id) => !!get().byStack[id],
   hasEnvironment: (id) => !!get().byEnvironment[id],
   hasEnvPin: (envId, pinKey) => !!get().byEnvPin[`${envId}::${pinKey}`],
+  hasStackPin: (stackId, pinKey) => !!get().byStackPin[`${stackId}::${pinKey}`],
 }))

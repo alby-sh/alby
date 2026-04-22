@@ -43,7 +43,7 @@ import { useActivityStore } from '../../stores/activity-store'
 import { useConnectionStore } from '../../stores/connection-store'
 import { usePresenceFor } from '../../stores/presence-store'
 import { AvatarStack } from '../ui/AvatarStack'
-import { useUnreadStore, type EnvPinKey } from '../../stores/unread-store'
+import { useUnreadStore, type EnvPinKey, type StackPinKey } from '../../stores/unread-store'
 import { NewProjectDialog } from '../dialogs/NewProjectDialog'
 import { FaviconOrIdenticon } from '../ui/ProjectIcon'
 import type { Agent, Project, Environment, Stack, Task, Routine } from '../../../shared/types'
@@ -79,9 +79,22 @@ function UnreadDot({ size = 8, variant = 'inline' }: { size?: number; variant?: 
 
 /** Thin wrappers that read reactively from the unread-store so a dot appears
  *  the instant an event arrives. Keeps the parent components terser. */
-function StackUnreadDot({ stackId }: { stackId: string }) {
-  const has = useUnreadStore((s) => !!s.byStack[stackId])
-  return has ? <span className="ml-1"><UnreadDot /></span> : null
+function StackUnreadDot({ stackId, hideWhenExpanded }: { stackId: string; hideWhenExpanded?: boolean }) {
+  // Stack rollup: byStack + any stackPin / env / envPin whose denorm
+  // stackId matches. Lets "anything happening inside this collapsed stack"
+  // light up the header even if the direct `byStack` entry was cleared.
+  const has = useUnreadStore((s) => {
+    if (s.byStack[stackId]) return true
+    const scan = (rec: Record<string, { stackId?: string }>): boolean =>
+      Object.values(rec).some((e) => e.stackId === stackId)
+    return scan(s.byStackPin) || scan(s.byEnvironment) || scan(s.byEnvPin)
+  })
+  // When the stack is expanded the user can see the per-pin dots directly,
+  // so the roll-up on the stack header would be redundant (and visually
+  // noisy). Parent passes `hideWhenExpanded=true` to gate the render.
+  if (!has) return null
+  if (hideWhenExpanded) return null
+  return <span className="ml-1"><UnreadDot /></span>
 }
 function EnvUnreadDot({ envId }: { envId: string }) {
   const has = useUnreadStore((s) => !!s.byEnvironment[envId])
@@ -89,6 +102,10 @@ function EnvUnreadDot({ envId }: { envId: string }) {
 }
 function PinUnreadDot({ envId, pinKey }: { envId: string; pinKey: EnvPinKey }) {
   const has = useUnreadStore((s) => !!s.byEnvPin[`${envId}::${pinKey}`])
+  return has ? <span className="ml-1"><UnreadDot /></span> : null
+}
+function StackPinUnreadDot({ stackId, pinKey }: { stackId: string; pinKey: StackPinKey }) {
+  const has = useUnreadStore((s) => !!s.byStackPin[`${stackId}::${pinKey}`])
   return has ? <span className="ml-1"><UnreadDot /></span> : null
 }
 
@@ -208,11 +225,10 @@ function SessionRow({
   // normalise to a lowercase kind to pick a colour and a short label.
   const kind = (agent.tab_name?.split(' ')[0] || 'terminal').toLowerCase()
   const color = SESSION_COLOR[kind] ?? SESSION_COLOR.terminal
+  const isRunningWorking = agent.status === 'running' && activity === 'working'
   const dotCls =
     agent.status === 'running'
-      ? activity === 'working'
-        ? 'bg-blue-400'
-        : 'bg-blue-500/70'
+      ? 'bg-blue-500/70'
       : agent.status === 'error'
         ? 'bg-red-500'
         : agent.status === 'completed'
@@ -265,7 +281,23 @@ function SessionRow({
       {dragOver === 'below' && !suppressOwnIndicator(agent.id) && (
         <div className="absolute left-10 right-2 bottom-0 h-[2px] bg-blue-500 rounded pointer-events-none" />
       )}
-      <span className={`size-2 rounded-full shrink-0 ${dotCls}`} />
+      {isRunningWorking ? (
+        // Spinning ring when the agent is actively doing something — mirrors
+        // the AgentBadge glyph used on the collapsed "Sessions" pin so the
+        // visual language stays consistent between "which envs have work"
+        // and "which specific agent is working".
+        <svg
+          viewBox="0 0 16 16"
+          className="size-3 shrink-0 animate-spin"
+          fill="none"
+          aria-label="Agent working"
+        >
+          <circle cx="8" cy="8" r="6" stroke="#60a5fa" strokeWidth="2" opacity="0.25" />
+          <path d="M8 2a6 6 0 0 1 6 6" stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" />
+        </svg>
+      ) : (
+        <span className={`size-2 rounded-full shrink-0 ${dotCls}`} />
+      )}
       <span
         className="ml-2 shrink-0 w-1 h-3 rounded-full"
         style={{ backgroundColor: color }}
@@ -931,6 +963,7 @@ function PinnedRow({
           </span>
         )}
         {kind === 'env' && <PinUnreadDot envId={containerId} pinKey={tabKey as EnvPinKey} />}
+        {kind === 'stack' && <StackPinUnreadDot stackId={containerId} pinKey={tabKey as StackPinKey} />}
         {!expanded && badge && <span className="ml-2 shrink-0">{badge}</span>}
         {/* No always-visible unpin button — too easy to fat-finger. Unpin is
             available via right-click → Unpin + via the pin icon in the tab
@@ -1705,7 +1738,7 @@ function StackGroup({
           <span className="text-[10px] uppercase tracking-wider text-neutral-500 shrink-0">
             {stack.kind.replace(/_/g, ' ')}
           </span>
-          <StackUnreadDot stackId={stack.id} />
+          <StackUnreadDot stackId={stack.id} hideWhenExpanded={expanded} />
           {openIssues != null && openIssues > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-red-500/20 text-red-300 text-[10px] font-medium tabular-nums shrink-0"
