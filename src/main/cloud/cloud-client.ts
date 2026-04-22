@@ -218,6 +218,13 @@ export const cloudClient = {
   deleteAgent(id: string): Promise<void> {
     return request('DELETE', `/api/agents/${id}`)
   },
+  /** Fire a broadcast-only reorder: every device on the project channel picks
+   *  it up via `entity.changed` / action=reordered and applies the order to
+   *  its own SQLite. The cloud doesn't store agent sort_order (would collide
+   *  across collaborators). */
+  reorderAgents(projectId: string, orderedIds: string[]): Promise<void> {
+    return request('POST', '/api/agents/reorder', { project_id: projectId, ordered_ids: orderedIds })
+  },
   /**
    * Batch-append chat-style transcript events to the cloud. The backend
    * has a UNIQUE (agent_id, seq) index, so retries with overlapping seqs
@@ -323,6 +330,12 @@ export const cloudClient = {
   deleteRoutine(id: string): Promise<void> {
     return request('DELETE', `/api/routines/${id}`)
   },
+  /** Persist sort_order server-side and broadcast. Devices on the project
+   *  channel pick up the `entity.changed` / routine / reordered event and
+   *  replay the same order into their local cache. */
+  reorderRoutines(environmentId: string, orderedIds: string[]): Promise<void> {
+    return request('POST', `/api/environments/${environmentId}/routines/reorder`, { ordered_ids: orderedIds })
+  },
 
   // ---------- Error tracking: Apps ----------
   listApps(projectId: string): Promise<ReportingApp[]> {
@@ -403,6 +416,12 @@ export const cloudClient = {
   },
   deleteNotifSub(appId: string, userId: number): Promise<void> {
     return request('DELETE', `/api/apps/${appId}/notification-subscriptions/${userId}`)
+  },
+  /** Return the current user's notification subs across every app they can
+   *  see. Used by the renderer's sync-store on boot to decide whether to
+   *  fire a native desktop notification when an issue event lands. */
+  listMyNotifSubs(): Promise<Array<Pick<NotificationSubscription, 'app_id' | 'triggers' | 'channels'>>> {
+    return request('GET', '/api/me/notification-subscriptions')
   },
 
   // ---------- Per-user Slack webhook ----------

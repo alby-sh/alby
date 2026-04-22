@@ -7,7 +7,7 @@ export class AgentsRepo {
 
   list(taskId: string): Agent[] {
     return this.db
-      .prepare('SELECT * FROM agents WHERE task_id = ? ORDER BY created_at')
+      .prepare('SELECT * FROM agents WHERE task_id = ? ORDER BY sort_order, created_at')
       .all(taskId) as Agent[]
   }
 
@@ -23,12 +23,20 @@ export class AgentsRepo {
     started_at: string
   }): Agent {
     const id = uuid()
+    // New agents go to the bottom of the task's list — same convention as
+    // RoutinesRepo.create. Without this, back-to-back spawns all share
+    // sort_order=0 and the reorder operation can't tell them apart.
+    const nextOrder = (
+      this.db
+        .prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM agents WHERE task_id = ?')
+        .get(data.task_id) as { m: number }
+    ).m + 1
     this.db
       .prepare(
-        `INSERT INTO agents (id, task_id, tab_name, status, prompt, started_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agents (id, task_id, tab_name, status, prompt, started_at, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, data.task_id, data.tab_name, data.status, data.prompt, data.started_at)
+      .run(id, data.task_id, data.tab_name, data.status, data.prompt, data.started_at, nextOrder)
     return this.get(id)!
   }
 
@@ -64,7 +72,7 @@ export class AgentsRepo {
          FROM agents a
          JOIN tasks t ON t.id = a.task_id
          JOIN environments e ON e.id = t.environment_id
-         ORDER BY a.created_at`
+         ORDER BY a.sort_order, a.created_at`
       )
       .all() as Agent[]
   }
@@ -81,12 +89,24 @@ export class AgentsRepo {
       .run()
   }
 
-  /** Mirror a cloud-sourced agent into the local cache. */
+  /** Mirror a cloud-sourced agent into the local cache.
+   *
+   * sort_order is intentionally NOT copied from the cloud payload — the
+   * cloud API doesn't track per-user sidebar order yet (Phase 2 will add
+   * that). We leave the local column untouched on update so user-initiated
+   * reorders survive subsequent cloud sync pulls. New inserts fall back to
+   * the bottom of the task via a COALESCE over the existing max.
+   */
   upsertFromCloud(agent: Agent): void {
+    const nextOrder = (
+      this.db
+        .prepare('SELECT COALESCE(MAX(sort_order), -1) AS m FROM agents WHERE task_id = ?')
+        .get(agent.task_id) as { m: number }
+    ).m + 1
     this.db
       .prepare(
-        `INSERT INTO agents (id, task_id, tab_name, status, prompt, exit_code, started_at, finished_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO agents (id, task_id, tab_name, status, prompt, exit_code, started_at, finished_at, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            task_id = excluded.task_id,
            tab_name = excluded.tab_name,
@@ -104,12 +124,26 @@ export class AgentsRepo {
         agent.prompt ?? null,
         agent.exit_code ?? null,
         agent.started_at ?? null,
-        agent.finished_at ?? null
+        agent.finished_at ?? null,
+        nextOrder
       )
   }
 
   delete(id: string): void {
     this.db.prepare('DELETE FROM agents WHERE id = ?').run(id)
+  }
+
+  /** Rewrite sort_order for every agent in `orderedIds` so their index in the
+   *  array becomes their new sort_order. Caller supplies ids that all belong
+   *  to the same env (SessionsSubTree scope); we don't enforce that because
+   *  agents' env lookup requires a JOIN and reorder happens often.
+   */
+  reorderAgents(orderedIds: string[]): void {
+    const stmt = this.db.prepare('UPDATE agents SET sort_order = ? WHERE id = ?')
+    const tx = this.db.transaction(() => {
+      orderedIds.forEach((id, i) => stmt.run(i, id))
+    })
+    tx()
   }
 
   /* ======================= Chat-specific helpers ======================= */

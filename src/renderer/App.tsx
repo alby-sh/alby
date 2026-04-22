@@ -11,9 +11,11 @@ import { useActivityStore } from './stores/activity-store'
 import { useConnectionStore } from './stores/connection-store'
 import { useAuthStore } from './stores/auth-store'
 import { subscribeToProject, useSyncBootstrap } from './stores/sync-store'
+import { usePresenceSubscriptions } from './stores/presence-store'
 import { useOnlineBootstrap, useOnlineStore } from './stores/online-store'
 import { useAllProjects } from './hooks/useProjects'
 import { useAgentHeartbeats } from './hooks/useAgentHeartbeats'
+import { useMyNotificationSubs } from './hooks/useIssues'
 import type { Agent } from '../shared/types'
 
 let _audioCtx: AudioContext | null = null
@@ -58,22 +60,57 @@ function showNotification(title: string, body: string, onClick?: () => void) {
   } catch { /* ignore */ }
 }
 
+/**
+ * Resolve an issue UUID into the project it belongs to and navigate the UI
+ * to its detail view. Used by the `alby://issues/<uuid>` deep-link flow.
+ * The issue→project lookup goes through `issues:get`, which the backend
+ * echoes `app.project_id` on specifically for this use case.
+ */
+async function openIssueById(issueId: string): Promise<void> {
+  try {
+    const detail = await window.electronAPI.issues.get(issueId)
+    const projectId = detail?.app?.project_id ?? null
+    const store = useAppStore.getState()
+    if (projectId) {
+      if (!store.expandedProjects.has(projectId)) {
+        store.toggleProjectExpanded(projectId)
+      }
+      store.selectProject(projectId)
+      store.openIssues(projectId)
+    }
+    store.openIssueDetail(issueId)
+  } catch (err) {
+    console.error('[deep-link] Failed to open issue:', err)
+  }
+}
+
 export default function App() {
   const initialized = useAppStore((s) => s.initialized)
   const init = useAppStore((s) => s.init)
   const authInitialized = useAuthStore((s) => s.initialized)
   const authUser = useAuthStore((s) => s.user)
   const authInit = useAuthStore((s) => s.init)
+  // Holds a deep-link issue id that arrived while the user wasn't logged in,
+  // so we can replay it after login. A single slot is enough — only the
+  // latest click matters.
+  const pendingDeepLinkIssue = useRef<string | null>(null)
   const showAllProjects = useAppStore((s) => s.showAllProjects)
   useEffect(() => { authInit() }, [authInit])
 
   // Wire up Reverb WebSocket: connect when logged in, subscribe to user + team
   // channels automatically. Project channels are added lazily below.
   useSyncBootstrap()
+  // Join presence channels for the currently-viewed agent / routine so the
+  // sidebar can show who else is looking at the same thing in real time.
+  usePresenceSubscriptions()
   // Track online/offline state for the offline-mode banner.
   useOnlineBootstrap()
   // Send working/viewed time deltas to the cloud every 30 s for reporting.
   useAgentHeartbeats()
+  // Keep the user's "which apps should push-notify me" preferences in cache
+  // — sync-store reads this on every incoming issue event to decide whether
+  // to fire a native desktop notification.
+  useMyNotificationSubs()
   const online = useOnlineStore((s) => s.online)
   const { data: projects } = useAllProjects()
   useEffect(() => {
@@ -119,6 +156,39 @@ export default function App() {
   }, [])
 
   useEffect(() => { init() }, [init])
+
+  // Deep-link plumbing for `alby://issues/<uuid>`. The main process queues
+  // URLs that arrive before the renderer is listening (cold-start argv on
+  // Win/Linux, pre-load open-url on macOS) — we drain that queue once on
+  // mount, then subscribe for URLs that arrive while the app is running.
+  // When the user isn't logged in we stash the issue id and replay it from
+  // a second effect below once auth resolves.
+  useEffect(() => {
+    const route = (issueId: string) => {
+      if (!useAuthStore.getState().user) {
+        pendingDeepLinkIssue.current = issueId
+      } else {
+        openIssueById(issueId)
+      }
+    }
+    const unsub = window.electronAPI.deepLink.onIssueOpen(({ issueId }) => route(issueId))
+    window.electronAPI.deepLink.consumePending()
+      .then((pending) => {
+        // Only the last click matters — if the user queued multiple, they
+        // meant the most recent one. Drop the rest silently.
+        if (pending.length > 0) route(pending[pending.length - 1].issueId)
+      })
+      .catch(() => { /* ignore */ })
+    return unsub
+  }, [])
+
+  useEffect(() => {
+    if (authUser && pendingDeepLinkIssue.current) {
+      const id = pendingDeepLinkIssue.current
+      pendingDeepLinkIssue.current = null
+      openIssueById(id)
+    }
+  }, [authUser])
 
   const selectTask = useAppStore((s) => s.selectTask)
   const setActiveAgentStore = useAppStore((s) => s.setActiveAgent)

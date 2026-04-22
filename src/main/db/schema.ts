@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS agents (
   started_at TEXT,
   finished_at TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  sort_order INTEGER NOT NULL DEFAULT 0,
   -- For chat-type agents: the claude-code session id, used to resume the
   -- conversation with --resume after the process has exited.
   chat_session_id TEXT

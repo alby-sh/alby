@@ -194,6 +194,7 @@ export interface Agent {
   started_at: string | null
   finished_at: string | null
   created_at: string
+  sort_order: number
   // Populated only by agents.listAll() via JOIN; undefined from per-task queries.
   project_id?: string
 }
@@ -502,8 +503,10 @@ export interface NotificationSubscription {
   app_id: string
   user_id: number
   triggers: Array<'new_issue' | 'regression'>
-  /** Per-channel delivery flags. Missing → treat as email-only (backward compat). */
-  channels?: { email?: boolean; slack?: boolean }
+  /** Per-channel delivery flags. Missing → treat as email-only (backward compat).
+   *  `push` is handled entirely by the Alby desktop client: the server just
+   *  stores the preference so it syncs across a user's devices. */
+  channels?: { email?: boolean; slack?: boolean; push?: boolean }
   user?: {
     id: number
     name: string
@@ -564,7 +567,7 @@ export interface UpdateWebhookDTO {
 export interface UpsertNotificationSubDTO {
   user_id?: number
   triggers: Array<'new_issue' | 'regression'>
-  channels?: { email?: boolean; slack?: boolean }
+  channels?: { email?: boolean; slack?: boolean; push?: boolean }
 }
 
 /** Event pushed by Reverb when a new issue / regression / new event happens. */

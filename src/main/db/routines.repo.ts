@@ -86,6 +86,21 @@ export class RoutinesRepo {
     this.db.prepare('DELETE FROM routines WHERE id = ?').run(id)
   }
 
+  /** Rewrite sort_order for every routine in `orderedIds` so their index in
+   *  the array becomes their new sort_order. `environmentId` is used both as
+   *  a safety scope (only rows in that env are touched) and to match how the
+   *  projects.repo reorder helpers are shaped.
+   */
+  reorderRoutines(environmentId: string, orderedIds: string[]): void {
+    const stmt = this.db.prepare(
+      'UPDATE routines SET sort_order = ? WHERE id = ? AND environment_id = ?'
+    )
+    const tx = this.db.transaction(() => {
+      orderedIds.forEach((id, i) => stmt.run(i, id, environmentId))
+    })
+    tx()
+  }
+
   /**
    * Mirror a routine fetched from the cloud API into the local cache so the
    * RoutineManager (which still reads local SQLite for runtime state) stays

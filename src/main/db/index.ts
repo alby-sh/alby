@@ -68,6 +68,19 @@ export function initDatabase(): Database.Database {
   if (!agentColumns.some((c) => c.name === 'chat_session_id')) {
     db.exec('ALTER TABLE agents ADD COLUMN chat_session_id TEXT')
   }
+  if (!agentColumns.some((c) => c.name === 'sort_order')) {
+    db.exec('ALTER TABLE agents ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0')
+    // Backfill existing rows so they keep their creation order instead of all
+    // collapsing to sort_order=0 (which would make every new reorder start
+    // from a messy mixed state).
+    db.exec(`
+      WITH ordered AS (
+        SELECT id, ROW_NUMBER() OVER (PARTITION BY task_id ORDER BY created_at) - 1 AS n
+        FROM agents
+      )
+      UPDATE agents SET sort_order = (SELECT n FROM ordered WHERE ordered.id = agents.id)
+    `)
+  }
 
   return db
 }

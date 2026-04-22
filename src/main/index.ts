@@ -29,6 +29,66 @@ let agentManager: AgentManager
 let routineManager: RoutineManager
 let connectionPool: ConnectionPool
 
+// Deep-link queue — filled before the renderer (or the window itself) exists,
+// drained as soon as the renderer signals it's ready via `deep-link:ready`.
+// Covers three cold-start paths: macOS `open-url`, Windows/Linux argv on first
+// launch, and Windows/Linux argv via `second-instance` for subsequent clicks.
+const pendingDeepLinks: string[] = []
+
+/**
+ * Parse an `alby://issues/<uuid>` URL into an `{ issueId }` payload.
+ * Returns null for anything that isn't on our scheme or doesn't match a
+ * supported path. We stay strict on the path so unknown alby:// URLs don't
+ * silently no-op — future deep-link kinds should extend this switch.
+ */
+function parseDeepLink(url: string): { kind: 'issue'; issueId: string } | null {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'alby:') return null
+    // `new URL('alby://issues/abc')` splits into host='issues', pathname='/abc'.
+    // Tolerate either layout so the upstream landing page isn't locked into one.
+    const host = parsed.host
+    const pathParts = parsed.pathname.split('/').filter(Boolean)
+    const parts = host ? [host, ...pathParts] : pathParts
+    if (parts[0] === 'issues' && parts[1]) {
+      return { kind: 'issue', issueId: decodeURIComponent(parts[1]) }
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+function focusMainWindow(): void {
+  if (!mainWindow) return
+  if (mainWindow.isMinimized()) mainWindow.restore()
+  mainWindow.show()
+  mainWindow.focus()
+  app.focus({ steal: true })
+}
+
+/**
+ * Route an incoming deep-link URL. If the renderer isn't ready yet we queue
+ * and let the `deep-link:ready` handshake drain the queue; otherwise we send
+ * straight to the window and surface it.
+ */
+function handleDeepLinkUrl(url: string): void {
+  const parsed = parseDeepLink(url)
+  if (!parsed) return
+  if (mainWindow && !mainWindow.webContents.isLoading()) {
+    mainWindow.webContents.send('deep-link:issue-open', { issueId: parsed.issueId })
+    focusMainWindow()
+  } else {
+    pendingDeepLinks.push(url)
+    if (mainWindow) focusMainWindow()
+  }
+}
+
+/** Extract the first `alby://…` token from a process argv slice. */
+function findDeepLinkInArgv(argv: string[]): string | null {
+  return argv.find((arg) => arg.startsWith('alby://')) ?? null
+}
+
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -67,6 +127,41 @@ function createWindow(): void {
     mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
+
+// Single-instance lock — required for deep links on Windows/Linux, where a
+// second `alby://` launch spawns a new process and we need to redirect the
+// URL into the already-running one. On macOS the OS delivers URLs via the
+// `open-url` event without a second process, but the lock is still safe
+// (harmless no-op).
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  app.on('second-instance', (_event, argv) => {
+    focusMainWindow()
+    const url = findDeepLinkInArgv(argv)
+    if (url) handleDeepLinkUrl(url)
+  })
+}
+
+// Register as the default handler for `alby://`. On dev, the executable is
+// `electron` itself and we need to hand it the project path as an arg so the
+// OS re-invokes us with the right script when a link is clicked.
+if (process.defaultApp) {
+  if (process.argv.length >= 2) {
+    app.setAsDefaultProtocolClient('alby', process.execPath, [process.argv[1]])
+  }
+} else {
+  app.setAsDefaultProtocolClient('alby')
+}
+
+// macOS delivers deep links through this event, not argv. It can fire before
+// `whenReady`, so we register it at module load and route through the same
+// queue as the other platforms.
+app.on('open-url', (event, url) => {
+  event.preventDefault()
+  handleDeepLinkUrl(url)
+})
 
 // Alby issue detector — initialized as early as possible so uncaught
 // exceptions and unhandled rejections from startup code are captured. The
@@ -122,11 +217,20 @@ app.whenReady().then(() => {
   // Bring the window to the foreground when the renderer asks (e.g. user
   // clicks a native issue notification while Alby is in the background).
   ipcMain.handle('app:focus', () => {
-    if (!mainWindow) return
-    if (mainWindow.isMinimized()) mainWindow.restore()
-    mainWindow.show()
-    mainWindow.focus()
-    app.focus({ steal: true })
+    focusMainWindow()
+  })
+
+  // Renderer handshake: once the app-level listener is mounted it calls this
+  // to drain any URLs that arrived before it was listening (cold start on
+  // Windows/Linux where the URL sits in argv, or a macOS open-url fired
+  // before the window's did-finish-load).
+  ipcMain.handle('deep-link:consume-pending', () => {
+    const payloads = pendingDeepLinks
+      .map((url) => parseDeepLink(url))
+      .filter((p): p is { kind: 'issue'; issueId: string } => p !== null)
+      .map((p) => ({ issueId: p.issueId }))
+    pendingDeepLinks.length = 0
+    return payloads
   })
 
   // Issue / regression notifications fired from the renderer's Reverb handler.
@@ -176,6 +280,12 @@ app.whenReady().then(() => {
   })
 
   createWindow()
+
+  // Cold-start deep-link on Windows/Linux: the URL arrives in our own argv
+  // (on macOS the same click fires `open-url` instead, which we handle
+  // above). Queue it so the renderer can drain it during its handshake.
+  const coldStartUrl = findDeepLinkInArgv(process.argv)
+  if (coldStartUrl) pendingDeepLinks.push(coldStartUrl)
 
   // Reconnect agents that were running when the app last closed
   if (mainWindow) {

@@ -133,6 +133,27 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
     await cloudWrite(cloudClient.deleteAgent(agentId))
   })
 
+  // Two-step reorder: first persist locally (so the UI is fast), then fire a
+  // broadcast-only cloud call so other devices on the same project channel
+  // receive `entity.changed` / action=reordered and catch up. The cloud
+  // endpoint doesn't store agent sort_order (it would collide across
+  // collaborators with different preferences), so without the broadcast
+  // other devices stay at their own ordering — acceptable as each user
+  // controls their own view.
+  ipcMain.handle('agents:reorder', async (_, orderedIds: string[]) => {
+    repo.reorderAgents(orderedIds)
+    if (orderedIds.length > 0) {
+      const firstAgent = repo.get(orderedIds[0])
+      if (firstAgent) {
+        const taskData = projectsRepo.getTaskWithEnvironment(firstAgent.task_id)
+        if (taskData) {
+          await cloudWrite(cloudClient.reorderAgents(taskData.environment.project_id, orderedIds))
+        }
+      }
+    }
+    return { ok: true }
+  })
+
   ipcMain.handle('agents:heartbeat', async (_, agentId: string, deltas: { working_delta?: number; viewed_delta?: number }) => {
     if (!(deltas.working_delta || deltas.viewed_delta)) return
     try { await cloudClient.heartbeatAgent(agentId, deltas) } catch (err) {

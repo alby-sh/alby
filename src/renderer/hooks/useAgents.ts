@@ -72,6 +72,17 @@ export function useDeleteAgent() {
   })
 }
 
+export function useReorderAgents() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (orderedIds: string[]) => api().agents.reorder(orderedIds),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['agents'] })
+      qc.invalidateQueries({ queryKey: ['agents-all'] })
+    },
+  })
+}
+
 export function useAgentStdout(callback: (data: { agentId: string; data: string }) => void) {
   useEffect(() => {
     const unsub = api().agents.onStdout(callback)

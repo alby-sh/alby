@@ -12,6 +12,9 @@ files:
   - '!{.eslintignore,.eslintrc.cjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md,CONTRIBUTING.md,CODE_OF_CONDUCT.md}'
   - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json,tsconfig.node.tsbuildinfo}'
   - '!resources/**'
+protocols:
+  - name: Alby Deep Link
+    schemes: [alby]
 mac:
   category: public.app-category.developer-tools
   target:

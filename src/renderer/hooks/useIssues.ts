@@ -200,7 +200,10 @@ export function useUpsertNotificationSub(appId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (data: UpsertNotificationSubDTO) => api().notificationSubs.upsert(appId, data),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['notification-subs', appId] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['notification-subs', appId] })
+      qc.invalidateQueries({ queryKey: ['notification-subs-mine'] })
+    },
   })
 }
 
@@ -208,7 +211,25 @@ export function useDeleteNotificationSub(appId: string) {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (userId: number) => api().notificationSubs.delete(appId, userId),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['notification-subs', appId] }) },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['notification-subs', appId] })
+      // My own sub might have been dropped — re-fetch the "mine" cache too
+      // so the push-notification gate reflects it immediately.
+      qc.invalidateQueries({ queryKey: ['notification-subs-mine'] })
+    },
+  })
+}
+
+/** Return all of the current user's notification subs across every app.
+ *  Used by the sync-store to gate native push notifications on issue events
+ *  and by the Alby user menu to show a "X apps alert me" summary. */
+export function useMyNotificationSubs() {
+  return useQuery<Array<Pick<NotificationSubscription, 'app_id' | 'triggers' | 'channels'>>>({
+    queryKey: ['notification-subs-mine'],
+    queryFn: () => api().notificationSubs.listMine(),
+    // Refetch on every focus so a push toggle on another device shows up here.
+    refetchOnWindowFocus: 'always',
+    staleTime: 60_000,
   })
 }
 

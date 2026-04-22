@@ -30,6 +30,13 @@ export function registerNotificationSubsIPC(): void {
     await cloudClient.deleteNotifSub(appId, userId)
   })
 
+  ipcMain.handle('notification-subs:list-mine', async () =>
+    safe(
+      () => cloudClient.listMyNotifSubs(),
+      [] as Array<Pick<NotificationSubscription, 'app_id' | 'triggers' | 'channels'>>,
+    )
+  )
+
   // Per-user Slack incoming-webhook. Writes are self-only server-side; the
   // read helpers are used by the Alerts panel to show a presence dot next to
   // teammates who have a webhook configured.

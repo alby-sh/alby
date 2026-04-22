@@ -3,8 +3,9 @@ import Pusher, { type Channel } from 'pusher-js'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { useAuthStore } from './auth-store'
-import { useUnreadStore } from './unread-store'
+import { useUnreadStore, type UnreadScope, type UnreadReason, type EnvPinKey } from './unread-store'
 import { useAppStore } from './app-store'
+import type { Agent, Environment, ReportingApp, Routine, Task } from '../../shared/types'
 
 /** Extract the projectId from a private-project.<id> Reverb channel name.
  *  Returns null for user/team channels so the unread tracker stays project-scoped. */
@@ -13,22 +14,115 @@ function projectIdFromChannelName(channelName: string): string | null {
   return m ? m[1] : null
 }
 
-type UnreadReason =
-  | 'issue.created'
-  | 'issue.regression'
-  | 'agent.finished'
-  | 'agent.activity'
-  | 'chat.reply'
-  | 'task.updated'
-  | 'routine.finished'
-
-/** Mark unread for `projectId` UNLESS the user is currently on that project —
- *  no point nagging them about something they're already looking at. */
-function markUnreadIfAway(projectId: string | null, reason: UnreadReason): void {
+/**
+ * Mark unread across every level a sync event touches.
+ *
+ * Each event carries a projectId (from the channel name) and optionally an
+ * entity id (agent/routine/issue). We resolve the full parent chain via the
+ * React Query cache to light up the stack + env + pin dots too — that way a
+ * user in project X but on the "Sessions" pin of env A still sees a dot on
+ * env B's "Routines" pin when a routine there finishes.
+ *
+ * The `entityView` param tells the function where the event is coming from
+ * so we can skip clearing paths the user is already looking at (e.g. don't
+ * mark the env dot when the user is standing on the env page).
+ */
+function markUnreadIfAway(
+  qc: QueryClient | null,
+  projectId: string | null,
+  reason: UnreadReason,
+  resolve?: (qc: QueryClient) => Partial<UnreadScope>,
+): void {
   if (!projectId) return
-  const currentProject = useAppStore.getState().selectedProjectId
-  if (currentProject === projectId) return
-  useUnreadStore.getState().mark(projectId, reason)
+  const scope: UnreadScope = { projectId }
+  if (qc && resolve) Object.assign(scope, resolve(qc))
+  // Drop levels the user is currently looking at — no point pinging them
+  // about something that's already on screen.
+  const app = useAppStore.getState()
+  if (scope.projectId && app.selectedProjectId === scope.projectId) delete scope.projectId
+  if (scope.environmentId && app.selectedEnvironmentId === scope.environmentId) {
+    delete scope.environmentId
+    // When the user is on the env, also skip pin dots inside it.
+    delete scope.envPin
+  }
+  if (Object.keys(scope).length === 0) return
+  useUnreadStore.getState().mark(scope, reason)
+}
+
+/** Walk the TanStack cache to find the env + stack an entity belongs to. */
+function resolveAgentScope(qc: QueryClient, agentId: string): Partial<UnreadScope> {
+  const all = qc.getQueryData<Agent[]>(['agents-all'])
+  const agent = all?.find((a) => a.id === agentId)
+  if (!agent) return {}
+  // agents-all already carries project_id via JOIN, so use that directly.
+  const projectId = agent.project_id
+  const taskCaches = findTaskCachesByProject(qc, projectId)
+  let envId: string | undefined
+  for (const { tasks } of taskCaches) {
+    const t = tasks.find((x) => x.id === agent.task_id)
+    if (t) { envId = t.environment_id; break }
+  }
+  return envBoundScope(qc, projectId, envId)
+}
+
+function resolveRoutineScope(qc: QueryClient, routineId: string): Partial<UnreadScope> {
+  // routines-all is our one-shot "all routines for this user" cache.
+  const all = qc.getQueryData<Routine[]>(['routines-all'])
+  const routine = all?.find((r) => r.id === routineId)
+  if (!routine) return {}
+  const envId = routine.environment_id
+  // Project id comes from walking envs for each known project.
+  const env = findEnv(qc, envId)
+  if (!env) return { environmentId: envId }
+  return envBoundScope(qc, env.project_id, envId, env)
+}
+
+function resolveIssueScope(qc: QueryClient, appId: string, projectId: string): Partial<UnreadScope> {
+  const apps = qc.getQueryData<ReportingApp[]>(['apps', projectId])
+  const app = apps?.find((a) => a.id === appId)
+  const envId = app?.environment_id ?? undefined
+  return envBoundScope(qc, projectId, envId)
+}
+
+/** Common rollup: given projectId + optional envId, resolve stack via envs. */
+function envBoundScope(
+  qc: QueryClient,
+  projectId: string | undefined,
+  envId: string | undefined,
+  envPreResolved?: Environment,
+  pinKey?: EnvPinKey,
+): Partial<UnreadScope> {
+  const scope: Partial<UnreadScope> = {}
+  if (projectId) scope.projectId = projectId
+  if (!envId) return scope
+  scope.environmentId = envId
+  const env = envPreResolved ?? findEnv(qc, envId)
+  if (env?.stack_id) scope.stackId = env.stack_id
+  if (pinKey) scope.envPin = { environmentId: envId, pinKey }
+  return scope
+}
+
+function findEnv(qc: QueryClient, envId: string): Environment | undefined {
+  // Iterate every `['environments', projectId]` cache entry looking for the
+  // requested id. Caches not populated yet → miss, which means we'll mark
+  // project only. That's OK; it'll converge on the next navigation.
+  const entries = qc.getQueriesData<Environment[]>({ queryKey: ['environments'] })
+  for (const [, list] of entries) {
+    const e = list?.find((x) => x.id === envId)
+    if (e) return e
+  }
+  return undefined
+}
+
+function findTaskCachesByProject(qc: QueryClient, _projectId: string | undefined): Array<{ envId: string; tasks: Task[] }> {
+  const out: Array<{ envId: string; tasks: Task[] }> = []
+  const entries = qc.getQueriesData<Task[]>({ queryKey: ['tasks'] })
+  for (const [key, list] of entries) {
+    if (!Array.isArray(list)) continue
+    const envId = Array.isArray(key) ? String(key[1] ?? '') : ''
+    out.push({ envId, tasks: list })
+  }
+  return out
 }
 import {
   REVERB_KEY,
@@ -39,7 +133,7 @@ import {
 } from '../../shared/cloud-constants'
 
 type EntityType = 'project' | 'environment' | 'task' | 'agent' | 'routine' | 'team' | 'member' | 'issue'
-type Action = 'created' | 'updated' | 'deleted'
+type Action = 'created' | 'updated' | 'deleted' | 'reordered'
 
 interface EntityChangedPayload {
   entity: EntityType
@@ -198,13 +292,34 @@ function handleIssueLive(
 
   // Desktop notification for NEW issues + regressions — not for every follow-up
   // event of the same issue, which would be noisy on a broken prod deploy.
+  // Gated on the user's per-app `channels.push` preference, read from the
+  // "my subscriptions" cache (populated on boot via useMyNotificationSubs).
   if (name === 'issue.created' || name === 'issue.regression') {
-    notifyIssue(name, payload)
+    const pushEnabled = isPushEnabledForApp(qc, payload.app_id, name)
+    if (pushEnabled) notifyIssue(name, payload)
     markUnreadIfAway(
+      qc,
       projectId,
       name === 'issue.regression' ? 'issue.regression' : 'issue.created',
+      (qc) => (projectId ? resolveIssueScope(qc, payload.app_id, projectId) : {}),
     )
   }
+}
+
+/** Look up the current user's push preference for a given app + trigger.
+ *  Returns false if we don't have the sub cache yet (safe default — we'd
+ *  rather miss a notification than spam the user on boot). */
+function isPushEnabledForApp(qc: QueryClient, appId: string, eventName: string): boolean {
+  const mine = qc.getQueryData<Array<{
+    app_id: string
+    triggers: Array<'new_issue' | 'regression'>
+    channels?: { push?: boolean }
+  }>>(['notification-subs-mine'])
+  if (!mine) return false
+  const sub = mine.find((s) => s.app_id === appId)
+  if (!sub?.channels?.push) return false
+  const trigger = eventName === 'issue.regression' ? 'regression' : 'new_issue'
+  return sub.triggers.includes(trigger)
 }
 
 // Native desktop notification via the main-process Electron Notification
@@ -265,6 +380,29 @@ function handleEntityChanged(
 ): void {
   if (!qc) return
   console.log('[sync] event:', payload)
+  // Reorder events carry the new order in payload.ordered_ids. We apply them
+  // through the same IPC the originating device used — that keeps local
+  // SQLite in sync and the TanStack invalidation below picks up the new
+  // ordering on the next fetch. Idempotent, so re-firing on the sender too
+  // is harmless.
+  if (payload.action === 'reordered') {
+    const ids = (payload.payload as { ordered_ids?: string[] } | undefined)?.ordered_ids
+    if (payload.entity === 'agent' && Array.isArray(ids)) {
+      window.electronAPI.agents.reorder(ids).catch(() => { /* ignore */ })
+      qc.invalidateQueries({ queryKey: ['agents'] })
+      qc.invalidateQueries({ queryKey: ['agents-all'] })
+      return
+    }
+    if (payload.entity === 'routine' && Array.isArray(ids)) {
+      const envId = (payload.payload as { environment_id?: string } | undefined)?.environment_id
+      if (envId) {
+        window.electronAPI.routines.reorder(envId, ids).catch(() => { /* ignore */ })
+      }
+      qc.invalidateQueries({ queryKey: ['routines'] })
+      qc.invalidateQueries({ queryKey: ['routines-all'] })
+      return
+    }
+  }
   // Fire unread-marker for "interesting" changes in a project you're not
   // currently looking at. Issues have their own dedicated events; here we
   // catch agent completions, new chat replies (synthesized by the backend
@@ -272,14 +410,27 @@ function handleEntityChanged(
   if (payload.entity === 'agent' && payload.action === 'updated') {
     const status = (payload.payload as { status?: string } | undefined)?.status
     if (status === 'completed' || status === 'error') {
-      markUnreadIfAway(projectId, 'agent.finished')
+      markUnreadIfAway(qc, projectId, 'agent.finished', (qc) => {
+        const base = resolveAgentScope(qc, payload.id)
+        // Agent events roll up to the Sessions pin inside the env.
+        if (base.environmentId) {
+          base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
+        }
+        return base
+      })
     }
   }
   if (payload.entity === 'routine' && payload.action === 'updated') {
-    markUnreadIfAway(projectId, 'routine.finished')
+    markUnreadIfAway(qc, projectId, 'routine.finished', (qc) => {
+      const base = resolveRoutineScope(qc, payload.id)
+      if (base.environmentId) {
+        base.envPin = { environmentId: base.environmentId, pinKey: 'routines' }
+      }
+      return base
+    })
   }
   if (payload.entity === 'task' && payload.action === 'updated') {
-    markUnreadIfAway(projectId, 'task.updated')
+    markUnreadIfAway(qc, projectId, 'task.updated')
   }
   // Map entity types → query keys the renderer listens on, and invalidate them.
   switch (payload.entity) {

@@ -205,6 +205,14 @@ export class AgentManager {
       // Chat agents own their connection lifecycle (respawn via restartChat
       // with --resume). They never go through this tmux-attach path.
       if (existing.runner instanceof ChatAgent) return
+      // Local agents have no "attachment" concept — the pty is owned by this
+      // process and either alive or dead. Never kill a live local runner just
+      // because this code was written with remote agents in mind; doing so
+      // removes it from `running`, which silently drops all subsequent
+      // writeStdin IPCs (output still flows because onData writes directly
+      // to webContents, which made the bug look like "terminal is alive but
+      // input is broken").
+      if (existing.runner instanceof LocalAgent) return
       const runner = existing.runner as RemoteAgent
       if (typeof runner.isSSHAlive === 'function' && runner.isSSHAlive()) return
       // Stale entry — drop it so attachRemote can create a fresh runner.

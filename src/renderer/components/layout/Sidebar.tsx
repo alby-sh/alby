@@ -24,9 +24,9 @@ import {
 } from '../../hooks/useProjects'
 import { useStacks, useReorderStacks } from '../../hooks/useStacks'
 import { useApps, useOpenIssueCounts } from '../../hooks/useIssues'
-import { useRoutines, useStartRoutine, useStopRoutine } from '../../hooks/useRoutines'
+import { useRoutines, useStartRoutine, useStopRoutine, useDeleteRoutine, useReorderRoutines } from '../../hooks/useRoutines'
 import { useQueryClient } from '@tanstack/react-query'
-import { useAllAgents, useSpawnAgent } from '../../hooks/useAgents'
+import { useAllAgents, useDeleteAgent, useKillAgent, useReorderAgents, useSpawnAgent } from '../../hooks/useAgents'
 import { useAppStore, type EnvTabKey, type StackTabKey } from '../../stores/app-store'
 import { useToastStore } from '../../stores/toast-store'
 import {
@@ -41,13 +41,56 @@ import {
 } from '../../lib/pins'
 import { useActivityStore } from '../../stores/activity-store'
 import { useConnectionStore } from '../../stores/connection-store'
+import { usePresenceFor } from '../../stores/presence-store'
+import { AvatarStack } from '../ui/AvatarStack'
+import { useUnreadStore, type EnvPinKey } from '../../stores/unread-store'
 import { NewProjectDialog } from '../dialogs/NewProjectDialog'
 import { FaviconOrIdenticon } from '../ui/ProjectIcon'
-import type { Agent, Project, Environment, Stack, Task } from '../../../shared/types'
+import type { Agent, Project, Environment, Stack, Task, Routine } from '../../../shared/types'
 
 const ease = 'cubic-bezier(0.25, 1.1, 0.4, 1)'
 
 export interface ContextMenuState { x: number; y: number; items: { label: string; onClick: () => void }[] }
+
+/**
+ * Tiny red dot used to signal "something here wants your attention". Shared
+ * across project/stack/env/pin rows so the visual language is consistent.
+ * `inline` variant sits next to a label (our default); `corner` absolute-
+ * positions into the top-right of a square icon.
+ */
+function UnreadDot({ size = 8, variant = 'inline' }: { size?: number; variant?: 'inline' | 'corner' }) {
+  if (variant === 'corner') {
+    return (
+      <span
+        className="absolute -top-0.5 -right-0.5 rounded-full bg-red-500 ring-2 ring-neutral-950"
+        style={{ width: size, height: size }}
+        aria-label="Unread activity"
+      />
+    )
+  }
+  return (
+    <span
+      className="inline-block rounded-full bg-red-500 shrink-0"
+      style={{ width: size, height: size }}
+      aria-label="Unread activity"
+    />
+  )
+}
+
+/** Thin wrappers that read reactively from the unread-store so a dot appears
+ *  the instant an event arrives. Keeps the parent components terser. */
+function StackUnreadDot({ stackId }: { stackId: string }) {
+  const has = useUnreadStore((s) => !!s.byStack[stackId])
+  return has ? <span className="ml-1"><UnreadDot /></span> : null
+}
+function EnvUnreadDot({ envId }: { envId: string }) {
+  const has = useUnreadStore((s) => !!s.byEnvironment[envId])
+  return has ? <span className="ml-1"><UnreadDot /></span> : null
+}
+function PinUnreadDot({ envId, pinKey }: { envId: string; pinKey: EnvPinKey }) {
+  const has = useUnreadStore((s) => !!s.byEnvPin[`${envId}::${pinKey}`])
+  return has ? <span className="ml-1"><UnreadDot /></span> : null
+}
 
 export function ContextMenu({ menu, onClose }: { menu: ContextMenuState; onClose: () => void }) {
   React.useEffect(() => {
@@ -133,10 +176,34 @@ const SESSION_COLOR: Record<string, string> = {
   codex: '#34d399',
 }
 
-function SessionRow({ agent, task, envId, isSelected }: { agent: Agent; task?: Task; envId: string; isSelected: boolean }) {
+const AGENT_DND_MIME = 'application/x-alby-agent'
+
+function SessionRow({
+  agent,
+  task,
+  envId,
+  isSelected,
+  index,
+  total,
+  allAgentIds,
+  onReorder,
+  onContextMenu,
+}: {
+  agent: Agent
+  task?: Task
+  envId: string
+  isSelected: boolean
+  index: number
+  total: number
+  allAgentIds: string[]
+  onReorder: (orderedIds: string[]) => void
+  onContextMenu: (e: React.MouseEvent, agent: Agent, index: number, total: number) => void
+}) {
   const activity = useActivityStore((s) => s.activities.get(agent.id))
   const selectTask = useAppStore((s) => s.selectTask)
   const setActiveAgent = useAppStore((s) => s.setActiveAgent)
+  const [dragOver, setDragOver] = useState<'above' | 'below' | null>(null)
+  const viewers = usePresenceFor('agent', agent.id)
   // tab_name is stored as a display string like "Claude" or "Terminal"; we
   // normalise to a lowercase kind to pick a colour and a short label.
   const kind = (agent.tab_name?.split(' ')[0] || 'terminal').toLowerCase()
@@ -154,9 +221,37 @@ function SessionRow({ agent, task, envId, isSelected }: { agent: Agent; task?: T
   const title = task?.is_default
     ? kind.charAt(0).toUpperCase() + kind.slice(1)
     : task?.title || 'Session'
+  // Suppress in-place "ghost" indicators on the dragged row itself.
+  const suppressOwnIndicator = (srcId: string): boolean => srcId === agent.id
   return (
     <div
-      className={`rounded-lg cursor-pointer flex items-center h-8 pl-10 pr-2 transition-colors ${
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(AGENT_DND_MIME, agent.id)
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(AGENT_DND_MIME)) return
+        e.preventDefault()
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        const upper = e.clientY - rect.top < rect.height / 2
+        setDragOver(upper ? 'above' : 'below')
+      }}
+      onDragLeave={() => setDragOver(null)}
+      onDrop={(e) => {
+        const srcId = e.dataTransfer.getData(AGENT_DND_MIME)
+        const where = dragOver
+        setDragOver(null)
+        if (!srcId || srcId === agent.id) return
+        const next = allAgentIds.filter((id) => id !== srcId)
+        const targetIdx = next.indexOf(agent.id)
+        if (targetIdx < 0) return
+        const insertAt = where === 'below' ? targetIdx + 1 : targetIdx
+        next.splice(insertAt, 0, srcId)
+        onReorder(next)
+      }}
+      onContextMenu={(e) => onContextMenu(e, agent, index, total)}
+      className={`relative rounded-lg cursor-pointer flex items-center h-8 pl-10 pr-2 transition-colors ${
         isSelected ? 'bg-neutral-800/60' : 'hover:bg-neutral-800/30'
       }`}
       onClick={() => {
@@ -164,12 +259,21 @@ function SessionRow({ agent, task, envId, isSelected }: { agent: Agent; task?: T
         setActiveAgent(agent.id)
       }}
     >
+      {dragOver === 'above' && !suppressOwnIndicator(agent.id) && (
+        <div className="absolute left-10 right-2 top-0 h-[2px] bg-blue-500 rounded pointer-events-none" />
+      )}
+      {dragOver === 'below' && !suppressOwnIndicator(agent.id) && (
+        <div className="absolute left-10 right-2 bottom-0 h-[2px] bg-blue-500 rounded pointer-events-none" />
+      )}
       <span className={`size-2 rounded-full shrink-0 ${dotCls}`} />
       <span
         className="ml-2 shrink-0 w-1 h-3 rounded-full"
         style={{ backgroundColor: color }}
       />
       <span className="ml-2 text-[12px] text-neutral-100 truncate flex-1">{title}</span>
+      {viewers.length > 0 && (
+        <span className="ml-2"><AvatarStack users={viewers} /></span>
+      )}
       <span className="ml-2 text-[10px] text-neutral-500 tabular-nums shrink-0">
         {formatAgo(agent.started_at || agent.created_at)}
       </span>
@@ -826,6 +930,7 @@ function PinnedRow({
             {displayLabel}
           </span>
         )}
+        {kind === 'env' && <PinUnreadDot envId={containerId} pinKey={tabKey as EnvPinKey} />}
         {!expanded && badge && <span className="ml-2 shrink-0">{badge}</span>}
         {/* No always-visible unpin button — too easy to fat-finger. Unpin is
             available via right-click → Unpin + via the pin icon in the tab
@@ -842,10 +947,12 @@ function SessionsSubTree({
   envId,
   agentsByTask,
   filter,
+  setContextMenu,
 }: {
   envId: string
   agentsByTask: Map<string, Agent[]>
   filter?: 'plain'
+  setContextMenu: (menu: ContextMenuState) => void
 }) {
   const { data: tasks } = useTasks(envId)
   const selectedTaskId = useAppStore((s) => s.selectedTaskId)
@@ -854,21 +961,63 @@ function SessionsSubTree({
   const setActiveAgent = useAppStore((s) => s.setActiveAgent)
   const spawnAgent = useSpawnAgent()
   const envAgents = useEnvAgents(tasks, agentsByTask)
+  const reorderAgents = useReorderAgents()
+  const deleteAgent = useDeleteAgent()
+  const killAgent = useKillAgent()
   const sorted = useMemo(() => {
-    const arr = [...envAgents]
-    if (filter === 'plain') {
-      arr.splice(0, arr.length, ...arr.filter((a) =>
-        (a.tab_name?.split(' ')[0] || 'terminal').toLowerCase() === 'terminal',
-      ))
-    }
+    const arr = filter === 'plain'
+      ? envAgents.filter((a) => (a.tab_name?.split(' ')[0] || 'terminal').toLowerCase() === 'terminal')
+      : [...envAgents]
+    // Honour sort_order the user set via drag or context-menu Move up/down.
+    // Falls back to created_at when two rows somehow share the same
+    // sort_order (migration race, concurrent inserts from cloud sync).
     arr.sort((a, b) => {
-      const ra = a.status === 'running' ? 0 : a.status === 'error' ? 1 : 2
-      const rb = b.status === 'running' ? 0 : b.status === 'error' ? 1 : 2
-      if (ra !== rb) return ra - rb
-      return (b.started_at || b.created_at || '').localeCompare(a.started_at || a.created_at || '')
+      if (a.sort_order !== b.sort_order) return a.sort_order - b.sort_order
+      return (a.created_at || '').localeCompare(b.created_at || '')
     })
     return arr
   }, [envAgents, filter])
+
+  const allIds = useMemo(() => sorted.map((a) => a.id), [sorted])
+
+  const handleReorder = useCallback(
+    (orderedIds: string[]) => {
+      reorderAgents.mutate(orderedIds)
+    },
+    [reorderAgents],
+  )
+
+  const moveBy = useCallback(
+    (idx: number, delta: number) => {
+      const j = idx + delta
+      if (j < 0 || j >= allIds.length) return
+      const next = [...allIds]
+      ;[next[idx], next[j]] = [next[j], next[idx]]
+      handleReorder(next)
+    },
+    [allIds, handleReorder],
+  )
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, agent: Agent, index: number, total: number) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const items: ContextMenuState['items'] = []
+      if (index > 0) items.push({ label: 'Move up', onClick: () => moveBy(index, -1) })
+      if (index < total - 1) items.push({ label: 'Move down', onClick: () => moveBy(index, 1) })
+      const isRunning = agent.status === 'running'
+      items.push({
+        label: isRunning ? 'Kill & delete' : 'Delete',
+        onClick: () => {
+          if (isRunning) killAgent.mutate(agent.id)
+          deleteAgent.mutate(agent.id)
+          if (activeAgentId === agent.id) setActiveAgent(null)
+        },
+      })
+      setContextMenu({ x: e.clientX, y: e.clientY, items })
+    },
+    [moveBy, killAgent, deleteAgent, activeAgentId, setActiveAgent, setContextMenu],
+  )
   if (sorted.length === 0) {
     const launchTerminal = async (): Promise<void> => {
       // Resolve (or create) the env's "general" default task, then spawn a
@@ -913,25 +1062,161 @@ function SessionsSubTree({
   }
   return (
     <>
-      {sorted.map((agent) => (
+      {sorted.map((agent, i) => (
         <SessionRow
           key={agent.id}
           agent={agent}
           task={tasks?.find((t) => t.id === agent.task_id)}
           envId={envId}
           isSelected={selectedTaskId === agent.task_id && activeAgentId === agent.id}
+          index={i}
+          total={sorted.length}
+          allAgentIds={allIds}
+          onReorder={handleReorder}
+          onContextMenu={handleContextMenu}
         />
       ))}
     </>
   )
 }
 
-function RoutinesSubTree({ envId }: { envId: string }) {
-  const { data: routines = [] } = useRoutines(envId)
+const ROUTINE_DND_MIME = 'application/x-alby-routine'
+
+function RoutineSidebarRow({
+  routine,
+  envId,
+  isSelected,
+  index,
+  total,
+  allIds,
+  onReorder,
+  onContextMenu,
+}: {
+  routine: Routine
+  envId: string
+  isSelected: boolean
+  index: number
+  total: number
+  allIds: string[]
+  onReorder: (orderedIds: string[]) => void
+  onContextMenu: (e: React.MouseEvent, r: Routine, index: number, total: number) => void
+}) {
   const selectRoutine = useAppStore((s) => s.selectRoutine)
-  const selectedRoutineId = useAppStore((s) => s.selectedRoutineId)
   const start = useStartRoutine()
   const stop = useStopRoutine()
+  const [dragOver, setDragOver] = useState<'above' | 'below' | null>(null)
+  const viewers = usePresenceFor('routine', routine.id)
+  const running = !!routine.tmux_session_name
+  return (
+    <div
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData(ROUTINE_DND_MIME, routine.id)
+        e.dataTransfer.effectAllowed = 'move'
+      }}
+      onDragOver={(e) => {
+        if (!e.dataTransfer.types.includes(ROUTINE_DND_MIME)) return
+        e.preventDefault()
+        const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+        const upper = e.clientY - rect.top < rect.height / 2
+        setDragOver(upper ? 'above' : 'below')
+      }}
+      onDragLeave={() => setDragOver(null)}
+      onDrop={(e) => {
+        const srcId = e.dataTransfer.getData(ROUTINE_DND_MIME)
+        const where = dragOver
+        setDragOver(null)
+        if (!srcId || srcId === routine.id) return
+        const next = allIds.filter((id) => id !== srcId)
+        const targetIdx = next.indexOf(routine.id)
+        if (targetIdx < 0) return
+        const insertAt = where === 'below' ? targetIdx + 1 : targetIdx
+        next.splice(insertAt, 0, srcId)
+        onReorder(next)
+      }}
+      onContextMenu={(e) => onContextMenu(e, routine, index, total)}
+      className={`relative group flex items-center h-8 pl-14 pr-2 rounded-lg cursor-pointer transition-colors ${
+        isSelected ? 'bg-neutral-800/60' : 'hover:bg-neutral-800/30'
+      }`}
+      onClick={() => selectRoutine(routine.id, envId)}
+    >
+      {dragOver === 'above' && (
+        <div className="absolute left-10 right-2 top-0 h-[2px] bg-blue-500 rounded pointer-events-none" />
+      )}
+      {dragOver === 'below' && (
+        <div className="absolute left-10 right-2 bottom-0 h-[2px] bg-blue-500 rounded pointer-events-none" />
+      )}
+      <button
+        type="button"
+        onClick={(e) => {
+          e.stopPropagation()
+          if (running) stop.mutate(routine.id)
+          else start.mutate(routine.id)
+        }}
+        className={`shrink-0 w-5 h-5 flex items-center justify-center rounded ${
+          running ? 'text-red-400 hover:bg-red-900/30' : 'text-emerald-400 hover:bg-emerald-900/30'
+        }`}
+        title={running ? 'Stop' : 'Start'}
+      >
+        {running ? <Stop size={10} /> : <Play size={10} />}
+      </button>
+      <span className="ml-2 text-[12px] text-neutral-200 truncate flex-1">{routine.name}</span>
+      {viewers.length > 0 && (
+        <span className="ml-2"><AvatarStack users={viewers} /></span>
+      )}
+      <span
+        className={`ml-2 shrink-0 text-[10px] uppercase tracking-wider ${running ? 'text-emerald-300' : 'text-neutral-500'}`}
+      >
+        {running ? 'run' : 'idle'}
+      </span>
+    </div>
+  )
+}
+
+function RoutinesSubTree({ envId, setContextMenu }: { envId: string; setContextMenu: (menu: ContextMenuState) => void }) {
+  const { data: routines = [] } = useRoutines(envId)
+  const selectedRoutineId = useAppStore((s) => s.selectedRoutineId)
+  const reorder = useReorderRoutines()
+  const deleteRoutine = useDeleteRoutine()
+  const stop = useStopRoutine()
+  const allIds = useMemo(() => routines.map((r) => r.id), [routines])
+
+  const handleReorder = useCallback(
+    (orderedIds: string[]) => { reorder.mutate({ envId, orderedIds }) },
+    [reorder, envId],
+  )
+
+  const moveBy = useCallback(
+    (idx: number, delta: number) => {
+      const j = idx + delta
+      if (j < 0 || j >= allIds.length) return
+      const next = [...allIds]
+      ;[next[idx], next[j]] = [next[j], next[idx]]
+      handleReorder(next)
+    },
+    [allIds, handleReorder],
+  )
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent, r: Routine, index: number, total: number) => {
+      e.preventDefault()
+      e.stopPropagation()
+      const items: ContextMenuState['items'] = []
+      if (index > 0) items.push({ label: 'Move up', onClick: () => moveBy(index, -1) })
+      if (index < total - 1) items.push({ label: 'Move down', onClick: () => moveBy(index, 1) })
+      const running = !!r.tmux_session_name
+      items.push({
+        label: running ? 'Stop & delete' : 'Delete',
+        onClick: () => {
+          if (running) stop.mutate(r.id)
+          deleteRoutine.mutate(r.id)
+        },
+      })
+      setContextMenu({ x: e.clientX, y: e.clientY, items })
+    },
+    [moveBy, stop, deleteRoutine, setContextMenu],
+  )
+
   if (routines.length === 0) {
     return (
       <div className="pl-14 pr-2 h-7 flex items-center text-[11px] text-neutral-500">
@@ -941,40 +1226,19 @@ function RoutinesSubTree({ envId }: { envId: string }) {
   }
   return (
     <>
-      {routines.map((r) => {
-        const running = !!r.tmux_session_name
-        const isSelected = selectedRoutineId === r.id
-        return (
-          <div
-            key={r.id}
-            className={`group flex items-center h-8 pl-14 pr-2 rounded-lg cursor-pointer transition-colors ${
-              isSelected ? 'bg-neutral-800/60' : 'hover:bg-neutral-800/30'
-            }`}
-            onClick={() => selectRoutine(r.id, envId)}
-          >
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                if (running) stop.mutate(r.id)
-                else start.mutate(r.id)
-              }}
-              className={`shrink-0 w-5 h-5 flex items-center justify-center rounded ${
-                running ? 'text-red-400 hover:bg-red-900/30' : 'text-emerald-400 hover:bg-emerald-900/30'
-              }`}
-              title={running ? 'Stop' : 'Start'}
-            >
-              {running ? <Stop size={10} /> : <Play size={10} />}
-            </button>
-            <span className="ml-2 text-[12px] text-neutral-200 truncate flex-1">{r.name}</span>
-            <span
-              className={`ml-2 shrink-0 text-[10px] uppercase tracking-wider ${running ? 'text-emerald-300' : 'text-neutral-500'}`}
-            >
-              {running ? 'run' : 'idle'}
-            </span>
-          </div>
-        )
-      })}
+      {routines.map((r, i) => (
+        <RoutineSidebarRow
+          key={r.id}
+          routine={r}
+          envId={envId}
+          isSelected={selectedRoutineId === r.id}
+          index={i}
+          total={routines.length}
+          allIds={allIds}
+          onReorder={handleReorder}
+          onContextMenu={handleContextMenu}
+        />
+      ))}
     </>
   )
 }
@@ -1193,6 +1457,7 @@ function EnvironmentGroup({
           {envName}
         </span>
         <ConnectionDot envId={envId} />
+        <EnvUnreadDot envId={envId} />
         {!isExpanded && <AgentBadge agents={envAgents} />}
       </div>
       {/* Git status icons sit just LEFT of the role badge, with their own
@@ -1244,15 +1509,15 @@ function EnvironmentGroup({
         const children = expandable
           ? (): React.ReactNode => {
               if (tabKey === 'sessions') {
-                return <SessionsSubTree envId={envId} agentsByTask={agentsByTask} />
+                return <SessionsSubTree envId={envId} agentsByTask={agentsByTask} setContextMenu={setContextMenu} />
               }
               if (tabKey === 'terminals') {
                 return (
-                  <SessionsSubTree envId={envId} agentsByTask={agentsByTask} filter="plain" />
+                  <SessionsSubTree envId={envId} agentsByTask={agentsByTask} filter="plain" setContextMenu={setContextMenu} />
                 )
               }
               if (tabKey === 'routines') {
-                return <RoutinesSubTree envId={envId} />
+                return <RoutinesSubTree envId={envId} setContextMenu={setContextMenu} />
               }
               if (tabKey === 'files') {
                 return <FilesSubTree />
@@ -1440,6 +1705,7 @@ function StackGroup({
           <span className="text-[10px] uppercase tracking-wider text-neutral-500 shrink-0">
             {stack.kind.replace(/_/g, ' ')}
           </span>
+          <StackUnreadDot stackId={stack.id} />
           {openIssues != null && openIssues > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-red-500/20 text-red-300 text-[10px] font-medium tabular-nums shrink-0"

@@ -236,12 +236,31 @@ export function DeployView({ environmentId }: Props) {
     }
   }, [environmentId])
 
-  // Stick to bottom as new log entries arrive.
+  // Stick-to-bottom with a user override — the previous implementation forced
+  // the viewport to the end on every log update, which made reading earlier
+  // output impossible while a deploy was streaming. Now we only auto-scroll
+  // when the user was already sitting at the bottom; if they've scrolled up
+  // to read, we leave them alone and surface a "jump to bottom" button.
+  const [stickToBottom, setStickToBottom] = useState(true)
   useEffect(() => {
-    if (logRef.current) {
+    if (stickToBottom && logRef.current) {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
-  }, [log])
+  }, [log, stickToBottom])
+
+  const onLogScroll = (): void => {
+    const el = logRef.current
+    if (!el) return
+    // 32px tolerance so the "stick" flag doesn't thrash on sub-pixel jitter
+    // during rapid streaming (especially with momentum scroll on macOS).
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 32
+    setStickToBottom(atBottom)
+  }
+
+  const jumpToBottom = (): void => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
+    setStickToBottom(true)
+  }
 
   const handleRun = async (dryRun: boolean): Promise<void> => {
     if (run.status === 'running') return
@@ -514,8 +533,12 @@ export function DeployView({ environmentId }: Props) {
         </div>
 
         {/* Log viewer */}
-        <div className="flex flex-col min-h-0">
-          <div ref={logRef} className="flex-1 overflow-y-auto bg-black/60 font-mono text-[12px] leading-relaxed p-4">
+        <div className="flex flex-col min-h-0 relative">
+          <div
+            ref={logRef}
+            onScroll={onLogScroll}
+            className="flex-1 overflow-y-auto bg-black/60 font-mono text-[12px] leading-relaxed p-4"
+          >
             {log.length === 0 && run.status === 'idle' && (
               <div className="text-neutral-600">
                 Ready. When updates land on <span className="font-mono">origin/{deploy.branch || 'main'}</span>, click <span className="text-neutral-300">Deploy now</span> to pull and run the pipeline.
@@ -525,6 +548,18 @@ export function DeployView({ environmentId }: Props) {
               <LogLine key={idx} entry={entry} />
             ))}
           </div>
+          {!stickToBottom && log.length > 0 && (
+            <button
+              type="button"
+              onClick={jumpToBottom}
+              title="Jump to latest output"
+              className="absolute bottom-4 right-4 w-8 h-8 rounded-full bg-neutral-800 border border-neutral-600 flex items-center justify-center text-neutral-300 hover:bg-neutral-700 hover:text-white shadow-lg transition-all z-10"
+            >
+              <svg viewBox="0 0 16 16" className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M4 6l4 4 4-4" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
         </div>
       </div>
 

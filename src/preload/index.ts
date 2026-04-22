@@ -81,6 +81,7 @@ const api = {
     getContext: (agentId: string) => ipcRenderer.invoke('agents:get-context', agentId),
     kill: (agentId: string) => ipcRenderer.invoke('agents:kill', agentId),
     delete: (agentId: string) => ipcRenderer.invoke('agents:delete', agentId),
+    reorder: (orderedIds: string[]) => ipcRenderer.invoke('agents:reorder', orderedIds),
     update: (agentId: string, data: { tab_name?: string }) =>
       ipcRenderer.invoke('agents:update', agentId, data),
     ensureAttached: (agentId: string) => ipcRenderer.invoke('agents:ensure-attached', agentId),
@@ -167,6 +168,7 @@ const api = {
     create: (data: unknown) => ipcRenderer.invoke('routines:create', data),
     update: (id: string, data: unknown) => ipcRenderer.invoke('routines:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('routines:delete', id),
+    reorder: (envId: string, orderedIds: string[]) => ipcRenderer.invoke('routines:reorder', envId, orderedIds),
     start: (id: string) => ipcRenderer.invoke('routines:start', id),
     stop: (id: string) => ipcRenderer.invoke('routines:stop', id),
     writeStdin: (id: string, data: string) => ipcRenderer.invoke('routines:write-stdin', id, data),
@@ -260,6 +262,19 @@ const api = {
     // Bring the Alby window to the foreground — used when the user clicks a
     // native notification while the app is hidden / behind other windows.
     focus: () => ipcRenderer.invoke('app:focus'),
+  },
+  deepLink: {
+    /** Subscribe to `alby://issues/<uuid>` events arriving while the app is
+     *  already running. Returns an unsubscribe fn. */
+    onIssueOpen: (callback: (data: { issueId: string }) => void) => {
+      const listener = (_: unknown, payload: { issueId: string }) => callback(payload)
+      ipcRenderer.on('deep-link:issue-open', listener)
+      return () => { ipcRenderer.removeListener('deep-link:issue-open', listener) }
+    },
+    /** Drain the queue of deep links that fired before the renderer was
+     *  listening (cold-start argv on Win/Linux, or pre-load macOS open-url). */
+    consumePending: (): Promise<Array<{ issueId: string }>> =>
+      ipcRenderer.invoke('deep-link:consume-pending'),
   },
   notifications: {
     /** Fire a native macOS notification via the main-process Notification API.
@@ -355,9 +370,10 @@ const api = {
   },
   notificationSubs: {
     list: (appId: string) => ipcRenderer.invoke('notification-subs:list', appId),
+    listMine: () => ipcRenderer.invoke('notification-subs:list-mine'),
     upsert: (
       appId: string,
-      data: { user_id?: number; triggers: string[]; channels?: { email?: boolean; slack?: boolean } },
+      data: { user_id?: number; triggers: string[]; channels?: { email?: boolean; slack?: boolean; push?: boolean } },
     ) => ipcRenderer.invoke('notification-subs:upsert', appId, data),
     delete: (appId: string, userId: number) =>
       ipcRenderer.invoke('notification-subs:delete', appId, userId),

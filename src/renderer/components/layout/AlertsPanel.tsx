@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
-import { CheckmarkFilled, Edit, LogoSlack, Email, Close } from '@carbon/icons-react'
+import { CheckmarkFilled, Edit, LogoSlack, Email, Close, Notification } from '@carbon/icons-react'
 import { useAuthStore } from '../../stores/auth-store'
 import { useWorkspaceRole } from '../../hooks/useWorkspaceRole'
 import type {
@@ -114,7 +114,7 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
 
   // Helper: produce the next state for a toggle + persist. Creates a new sub
   // with sensible defaults when the user hadn't subscribed before.
-  const toggleChannel = (userId: number, channel: 'email' | 'slack', value: boolean): void => {
+  const toggleChannel = (userId: number, channel: 'email' | 'slack' | 'push', value: boolean): void => {
     const existing = subByUser.get(userId)
     const triggers: Trigger[] = existing?.triggers?.length
       ? (existing.triggers as Trigger[])
@@ -122,11 +122,12 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
     const channels = {
       email: existing?.channels?.email ?? true,
       slack: existing?.channels?.slack ?? false,
+      push: existing?.channels?.push ?? false,
       [channel]: value,
     }
-    // If both channels turned off, drop the subscription entirely — cleaner
-    // than keeping a row with "nothing on".
-    if (!channels.email && !channels.slack) {
+    // If every channel is off, drop the subscription entirely — cleaner than
+    // keeping a row with "nothing on".
+    if (!channels.email && !channels.slack && !channels.push) {
       remove.mutate(userId)
       return
     }
@@ -184,11 +185,12 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
       {subsLoading && <div className="text-[12px] text-neutral-500">Loading…</div>}
 
       <div className="rounded-md border border-neutral-800 divide-y divide-neutral-900 overflow-hidden">
-        <div className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-neutral-500 bg-neutral-950">
+        <div className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-2 text-[11px] uppercase tracking-wider text-neutral-500 bg-neutral-950">
           <div>Member</div>
           <div className="w-24 text-center">Triggers</div>
           <div className="w-20 text-center">Email</div>
           <div className="w-20 text-center">Slack</div>
+          <div className="w-20 text-center" title="Native desktop notification in Alby. Each user controls their own.">Push</div>
         </div>
         {members.length === 0 && !subsLoading && (
           <div className="px-3 py-6 text-center text-[12px] text-neutral-500">
@@ -203,13 +205,18 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
           const channels = {
             email: sub?.channels?.email ?? false,
             slack: sub?.channels?.slack ?? false,
+            push: sub?.channels?.push ?? false,
           }
           const slackOnButNoHook = channels.slack && !slackPresence[m.id]
+          // Push is intrinsically per-device: only the user themself can
+          // toggle their own push preference, because no-one else's desktop
+          // is involved. Admins can edit email/slack for others but not push.
+          const canEditPush = isSelf
 
           return (
             <div
               key={m.id}
-              className="grid grid-cols-[1fr_auto_auto_auto] gap-3 px-3 py-3 items-center"
+              className="grid grid-cols-[1fr_auto_auto_auto_auto] gap-3 px-3 py-3 items-center"
             >
               <div className="flex items-center gap-2 min-w-0">
                 <Avatar name={m.name} url={m.avatar_url} />
@@ -263,6 +270,20 @@ export function AlertsPanel({ appId, project }: AlertsPanelProps): React.ReactEl
                       : 'Slack'
                   }
                   warn={slackOnButNoHook}
+                />
+              </div>
+
+              <div className="w-20 flex items-center justify-center">
+                <Toggle
+                  icon={<Notification size={14} />}
+                  active={channels.push}
+                  disabled={!canEditPush}
+                  onChange={(v) => toggleChannel(m.id, 'push', v)}
+                  title={
+                    isSelf
+                      ? 'Native desktop notification in Alby when an issue fires'
+                      : "Only this user can toggle their own push — no-one else's desktop can receive it"
+                  }
                 />
               </div>
             </div>

@@ -63,6 +63,12 @@ export class LocalAgent extends EventEmitter {
   // first idle marker arrives — matches RemoteAgent behaviour.
   private currentActivity: AgentActivity = 'working'
   private activityDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  // Remember the last size the renderer asked for so that when we fall back
+  // to a different shell mid-start, the new pty is sized to match the
+  // xterm DOM instead of staying at the 120x40 spawn default (mismatch
+  // breaks cursor math, which in turn can make input look frozen).
+  private lastCols = 120
+  private lastRows = 40
 
   constructor(
     private agentId: string,
@@ -88,12 +94,14 @@ export class LocalAgent extends EventEmitter {
   start(): void {
     const tag = `[LocalAgent ${this.agentId.slice(0, 8)}]`
 
-    // Visible diagnostics printed directly to the terminal pane so the user
-    // can see exactly what happened if the session never renders anything
-    // useful. Paired with persistLog → the file is the source of truth even
-    // if the tab closes; the in-pane echo is just convenience.
-    const diag = (msg: string, color = 36): void => {
+    // Diagnostics. Always persisted to ~/Library/Logs/Alby/local-agent.log
+    // so a post-mortem is possible even if the tab closes. Only echoed into
+    // the terminal pane itself when `visible=true` (the fallback/failure
+    // paths) — the success path stays quiet so the user doesn't see a
+    // banner scroll by every time they open a shell.
+    const diag = (msg: string, color = 36, visible = false): void => {
       persistLog(`${tag} ${msg}`)
+      if (!visible) return
       try {
         if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) return
         this.win.webContents.send('agent:stdout', {
@@ -121,92 +129,237 @@ export class LocalAgent extends EventEmitter {
       return
     }
 
-    const shell = pickShell()
-    // Plain-terminal mode: start a login shell + force interactive (-i).
-    // Without -i the shell auto-detects interactivity via isatty; that
-    // detection can return false under node-pty on some macOS setups (the
-    // slave fd isn't always recognised as the controlling terminal before
-    // exec), making zsh exit code=1 bytes=0 the instant it starts. Passing
-    // -i explicitly is what Terminal.app does internally for a new window
-    // and takes the guessing out of the equation.
+    const userShell = pickShell()
     const wantsInteractiveShell =
       this.agentType === 'terminal' ||
       !this.command ||
       this.command === 'bash -l' ||
       this.command === 'zsh -l'
-    const args = wantsInteractiveShell
-      ? ['-l', '-i']
-      : ['-l', '-i', '-c', this.command]
-    console.log(`${tag} spawn shell=${shell} cwd=${this.cwd} args=${JSON.stringify(args)}`)
-    diag(
-      `shell=${shell} ${
-        wantsInteractiveShell
-          ? 'mode=interactive'
-          : 'command=' + JSON.stringify(this.command).slice(0, 200)
-      }`,
-    )
 
-    try {
-      // -l makes it a login shell so .zprofile / .bashrc / nvm / asdf paths
-      // are sourced — necessary for `claude`, `gemini`, `codex` to be on PATH.
-      // For AI agents we also pass -i -c <cmd> so the command runs inside an
-      // interactive shell (oh-my-zsh gates some PATH config on $PS1).
-      this.process = pty.spawn(shell, args, {
-        name: 'xterm-256color',
-        cols: 120,
-        rows: 40,
-        cwd: this.cwd,
-        env: { ...(process.env as Record<string, string>), ...this.extraEnv },
-      })
-      console.log(`${tag} spawned pid=${this.process.pid}`)
-      diag(`spawned pid=${this.process.pid}`)
-    } catch (err) {
-      this.fail(`Failed to spawn local shell '${shell}': ${(err as Error).message}`)
-      return
+    // Three-step fallback ladder for spawning the local shell. Each attempt
+    // produces a tagged diag line so the user can see which strategy worked
+    // (or failed). Earlier revisions hard-coded `zsh -l -i` + full env —
+    // some macOS setups (nvm + oh-my-zsh + custom .zprofile) produce an
+    // immediate exit=1 bytes=0 under node-pty even though the same command
+    // works from Terminal.app. The ladder degrades gracefully:
+    //   1) user's shell + -l -i + full process.env
+    //   2) user's shell + --no-rcs + minimal env (HOME/PATH/TERM/USER/LANG/SHELL only)
+    //   3) /bin/bash + -l + same minimal env
+    // Step 2 skips .zshrc/.zprofile, step 3 escapes zsh entirely for the
+    // users whose shell config is fundamentally incompatible with a fresh
+    // node-pty tty.
+    interface SpawnAttempt {
+      label: string
+      shell: string
+      args: string[]
+      env: Record<string, string>
+    }
+    const fullEnv: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      ...this.extraEnv,
+    }
+    // Minimal env for rc-file-less fallbacks. We inherit PATH from the parent
+    // process (which was set by login / Spotlight / Terminal.app launch and
+    // includes nvm's shims, Homebrew, the user's ~/.local/bin, etc.) so
+    // binaries like `claude`, `gemini`, `codex`, `node` remain findable even
+    // when we skip sourcing .zshrc / .zprofile. Previous revision hardcoded
+    // PATH=/usr/bin:/bin:/opt/homebrew/bin which lost every nvm-managed tool.
+    const minimalEnv: Record<string, string> = {
+      HOME: process.env.HOME ?? '',
+      USER: process.env.USER ?? '',
+      LOGNAME: process.env.LOGNAME ?? process.env.USER ?? '',
+      LANG: process.env.LANG ?? 'en_US.UTF-8',
+      PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin',
+      TERM: 'xterm-256color',
+      SHELL: userShell,
+      ...this.extraEnv,
     }
 
-    let firstDataLogged = false
-    let totalBytes = 0
-    this.process.onData((data: string) => {
-      totalBytes += data.length
-      if (!firstDataLogged) {
-        firstDataLogged = true
-        console.log(`${tag} first stdout bytes=${data.length}`)
-      }
-      if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) {
-        // Window is gone (app quitting or being torn down). Kill the pty so
-        // we don't get stuck emitting data into a dead receiver.
-        try { this.process?.kill() } catch { /* ignore */ }
-        this.process = null
-        return
-      }
-      try {
-        // Activity detection on the same OSC patterns RemoteAgent listens to —
-        // local Claude/Gemini emits them regardless of host.
-        this.detectActivityFromOutput(data)
-        this.win.webContents.send('agent:stdout', {
-          agentId: this.agentId,
-          data
-        })
-      } catch {
-        // IPC failed — webContents was likely destroyed between the check
-        // and the send. Nothing we can do with the output anymore.
-      }
-    })
+    // `zsh -l` (login shell) dies silently (exit=1, bytes=0, ~180ms) on
+    // packaged hardened-runtime Electron builds on some macOS setups — plain
+    // `node` and `electron` dev can't reproduce, but Alby.app from
+    // /Applications consistently does. We can't stop zsh from dying during
+    // login init, so we sidestep it: spawn `zsh -i` instead, pre-populate
+    // PATH with the paths /etc/zprofile's path_helper + ~/.zprofile's brew
+    // shellenv would normally add, and let `.zshrc` handle the rest (nvm,
+    // aliases, prompt). Users whose PATH setup lives exclusively in
+    // ~/.zprofile will miss those exports, but that's rare — most dev setups
+    // either use .zshrc for PATH or have the paths we inject covering it.
+    const interactiveEnv: Record<string, string> = { ...fullEnv }
+    if (!interactiveEnv.LANG && !interactiveEnv.LC_ALL) {
+      interactiveEnv.LANG = 'en_US.UTF-8'
+    }
+    const pathParts = (interactiveEnv.PATH ?? '').split(':').filter(Boolean)
+    const injectIfMissing = (p: string): void => {
+      if (existsSync(p) && !pathParts.includes(p)) pathParts.unshift(p)
+    }
+    // Homebrew first so `brew`-installed binaries shadow system ones, matching
+    // what `eval "$(/opt/homebrew/bin/brew shellenv)"` would produce.
+    injectIfMissing(`${process.env.HOME}/.local/bin`)
+    injectIfMissing('/opt/homebrew/bin')
+    injectIfMissing('/opt/homebrew/sbin')
+    injectIfMissing('/usr/local/bin')
+    interactiveEnv.PATH = pathParts.join(':')
+    // HOMEBREW_* vars normally set by `brew shellenv` — keep them consistent
+    // so scripts that rely on them (including Homebrew's own formulae) work.
+    if (existsSync('/opt/homebrew/bin/brew') && !interactiveEnv.HOMEBREW_PREFIX) {
+      interactiveEnv.HOMEBREW_PREFIX = '/opt/homebrew'
+      interactiveEnv.HOMEBREW_CELLAR = '/opt/homebrew/Cellar'
+      interactiveEnv.HOMEBREW_REPOSITORY = '/opt/homebrew'
+    }
 
-    this.process.onExit(({ exitCode }: { exitCode: number }) => {
-      console.log(`${tag} exited code=${exitCode} firstData=${firstDataLogged} total=${totalBytes}`)
-      diag(
-        `shell exited code=${exitCode} bytes=${totalBytes}${
-          totalBytes === 0
-            ? " (nothing printed — check the command, your $SHELL or PATH)"
-            : ""
-        }`,
-        exitCode === 0 ? 32 : 31,
-      )
-      this.process = null
-      this.emit('exit', exitCode)
-    })
+    // Build the attempt ladder. Each attempt degrades along two axes: rc-file
+    // sourcing and env cleanliness. The primary is what Terminal.app-users
+    // expect; the last resort is a bare POSIX shell that can't miss.
+    const attempts: SpawnAttempt[] = wantsInteractiveShell
+      ? [
+          // Login + interactive with augmented env. Pre-injected PATH gives
+          // login rc files (brew shellenv, nvm use default) a head start, and
+          // on setups where the earlier `zsh -l` silent-exit was actually
+          // tripped by missing PATH entries it no longer fires.
+          { label: 'primary', shell: userShell, args: ['-l', '-i'], env: interactiveEnv },
+          // Interactive-only fallback — no login rc files. Sources .zshrc
+          // (aliases, nvm function, prompt) but skips .zprofile. Loses
+          // `nvm use default` so node won't be on PATH until the user runs
+          // it themselves, but at least the shell is alive.
+          { label: 'no-login', shell: userShell, args: ['-i'], env: interactiveEnv },
+          // zsh's interactivity auto-detection can flake under node-pty; force
+          // it via --no-rcs + -i but skip rc files. Keep the parent's PATH
+          // so shell-managed binaries (nvm, brew) stay reachable.
+          {
+            label: 'no-rcs',
+            shell: userShell,
+            args: userShell.endsWith('zsh') ? ['--no-rcs', '-i'] : ['--noprofile', '--norc', '-i'],
+            env: minimalEnv,
+          },
+          { label: 'bash-bare', shell: '/bin/bash', args: ['--noprofile', '--norc', '-i'], env: minimalEnv },
+        ]
+      : [
+          // Command-runner mode (claude/gemini/codex). Login + interactive
+          // with augmented env — gives .zprofile's `nvm use default` the
+          // chance to put node on PATH before claude/gemini/codex is looked
+          // up. Falls back to `-i -c` (no login) if login silently dies.
+          { label: 'primary', shell: userShell, args: ['-l', '-i', '-c', this.command], env: interactiveEnv },
+          { label: 'no-login', shell: userShell, args: ['-i', '-c', this.command], env: interactiveEnv },
+          {
+            label: 'no-rcs',
+            shell: userShell,
+            args: userShell.endsWith('zsh')
+              ? ['--no-rcs', '-c', this.command]
+              : ['--noprofile', '--norc', '-c', this.command],
+            env: minimalEnv,
+          },
+          { label: 'bash-bare', shell: '/bin/bash', args: ['--noprofile', '--norc', '-c', this.command], env: minimalEnv },
+        ]
+
+    let attemptIdx = 0
+    let currentLabel = ''
+    let spawnedAt = 0
+    let totalBytes = 0
+    let firstDataLogged = false
+
+    const attachListeners = (): void => {
+      if (!this.process) return
+      this.process.onData((data: string) => {
+        totalBytes += data.length
+        if (!firstDataLogged) {
+          firstDataLogged = true
+          console.log(`${tag} [${currentLabel}] first stdout bytes=${data.length}`)
+          persistLog(
+            `${tag} [${currentLabel}] first stdout pid=${this.process?.pid} bytes=${data.length}`,
+          )
+        }
+        if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) {
+          try { this.process?.kill() } catch { /* ignore */ }
+          this.process = null
+          return
+        }
+        try {
+          this.detectActivityFromOutput(data)
+          this.win.webContents.send('agent:stdout', {
+            agentId: this.agentId,
+            data,
+          })
+        } catch { /* ignore — window torn down mid-write */ }
+      })
+
+      this.process.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+        const elapsedMs = Date.now() - spawnedAt
+        console.log(
+          `${tag} [${currentLabel}] exited code=${exitCode} signal=${signal ?? 0} firstData=${firstDataLogged} total=${totalBytes} elapsedMs=${elapsedMs}`,
+        )
+        persistLog(
+          `${tag} [${currentLabel}] exited code=${exitCode} signal=${signal ?? 0} firstData=${firstDataLogged} bytes=${totalBytes} elapsedMs=${elapsedMs}`,
+        )
+        // If the shell died nearly-instantly without ever printing anything,
+        // the most likely cause is rc-file breakage or env incompatibility —
+        // or zsh exiting clean code=0 because it couldn't acquire a
+        // controlling tty (seen on some macOS + node-pty + Electron combos:
+        // the tty is there, but zsh reads EOF on stdin immediately and
+        // interprets that as "session ended successfully"). Either way,
+        // zero output in < 2s means the session is unusable, regardless of
+        // exit code — fall back.
+        const earlyFailure = !firstDataLogged && totalBytes === 0 && elapsedMs < 2000
+        if (earlyFailure && attemptIdx < attempts.length) {
+          diag(
+            `[${currentLabel}] exited code=${exitCode} sig=${signal ?? 0} bytes=0 in ${elapsedMs}ms — falling back`,
+            33,
+            true,
+          )
+          this.process = null
+          firstDataLogged = false
+          totalBytes = 0
+          if (tryNext()) {
+            attachListeners()
+            return
+          }
+        }
+        diag(
+          `[${currentLabel}] shell exited code=${exitCode} bytes=${totalBytes}${
+            totalBytes === 0
+              ? ' (nothing printed — all fallback shells failed, check ~/Library/Logs/Alby/local-agent.log)'
+              : ''
+          }`,
+          exitCode === 0 ? 32 : 31,
+          totalBytes === 0,
+        )
+        this.process = null
+        this.emit('exit', exitCode)
+      })
+    }
+
+    const tryNext = (): boolean => {
+      if (attemptIdx >= attempts.length) return false
+      const a = attempts[attemptIdx]
+      attemptIdx++
+      try {
+        this.process = pty!.spawn(a.shell, a.args, {
+          name: 'xterm-256color',
+          cols: this.lastCols,
+          rows: this.lastRows,
+          cwd: this.cwd,
+          env: a.env,
+        })
+        currentLabel = a.label
+        spawnedAt = Date.now()
+        console.log(`${tag} [${a.label}] spawned pid=${this.process.pid} shell=${a.shell} args=${JSON.stringify(a.args)}`)
+        diag(
+          `[${a.label}] shell=${a.shell} args=${JSON.stringify(a.args).slice(0, 120)} envKeys=${Object.keys(a.env).length} cols=${this.lastCols} rows=${this.lastRows}`,
+        )
+        return true
+      } catch (err) {
+        const msg = (err as Error).message
+        persistLog(`${tag} [${a.label}] spawn threw: ${msg}`)
+        diag(`[${a.label}] spawn threw: ${msg}`, 31, true)
+        return tryNext()
+      }
+    }
+
+    if (!tryNext()) {
+      this.fail(`All spawn attempts failed. Last shell tried: ${userShell}`)
+      return
+    }
+    attachListeners()
   }
 
   // Push the failure both as visible stderr in the terminal AND as an exit
@@ -223,10 +376,25 @@ export class LocalAgent extends EventEmitter {
   }
 
   writeStdin(data: string): void {
-    this.process?.write(data)
+    if (!this.process) {
+      persistLog(`[LocalAgent ${this.agentId.slice(0, 8)}] writeStdin DROPPED (no process) len=${data.length}`)
+      return
+    }
+    try {
+      this.process.write(data)
+      persistLog(
+        `[LocalAgent ${this.agentId.slice(0, 8)}] writeStdin pid=${this.process.pid} len=${data.length} firstByte=${data.charCodeAt(0)}`,
+      )
+    } catch (err) {
+      persistLog(
+        `[LocalAgent ${this.agentId.slice(0, 8)}] writeStdin THREW err=${(err as Error).message}`,
+      )
+    }
   }
 
   resize(cols: number, rows: number): void {
+    this.lastCols = cols
+    this.lastRows = rows
     try { this.process?.resize(cols, rows) } catch { /* ignore */ }
   }
 

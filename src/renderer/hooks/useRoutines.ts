@@ -55,6 +55,18 @@ export function useDeleteRoutine() {
   })
 }
 
+export function useReorderRoutines() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ envId, orderedIds }: { envId: string; orderedIds: string[] }) =>
+      api().routines.reorder(envId, orderedIds),
+    onSuccess: (_, { envId }) => {
+      qc.invalidateQueries({ queryKey: ['routines', envId] })
+      qc.invalidateQueries({ queryKey: ['routines-all'] })
+    },
+  })
+}
+
 export function useStartRoutine() {
   const qc = useQueryClient()
   return useMutation({

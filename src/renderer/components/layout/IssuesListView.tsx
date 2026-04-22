@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
-import { ChevronLeft, Settings } from '@carbon/icons-react'
+import { ChevronLeft, Close, Notification, Settings } from '@carbon/icons-react'
 import { useAppStore } from '../../stores/app-store'
 import { useApps, useIssues } from '../../hooks/useIssues'
-import { useEnvironments } from '../../hooks/useProjects'
+import { useEnvironments, useAllProjects } from '../../hooks/useProjects'
 import { useStack } from '../../hooks/useStacks'
-import type { IssueLevel, IssueStatus } from '../../../shared/types'
+import type { IssueLevel, IssueStatus, Project } from '../../../shared/types'
 import { IssuesSetupView } from './IssuesSetupView'
+import { AlertsPanel } from './AlertsPanel'
 
 const STATUS_OPTIONS: { value: IssueStatus | 'all'; label: string }[] = [
   { value: 'open', label: 'Open' },
@@ -99,6 +100,12 @@ export function IssuesListView({
   // re-run the install agent against a different env). Local state so the
   // flag disappears when the user navigates away.
   const [manageInstallOpen, setManageInstallOpen] = useState(false)
+  const [manageAlertsOpen, setManageAlertsOpen] = useState(false)
+  const { data: allProjects = [] } = useAllProjects()
+  const project = useMemo<Project | null>(
+    () => allProjects.find((p) => p.id === projectId) ?? null,
+    [allProjects, projectId],
+  )
 
   // Setup wizard shows WHEN:
   //   - Monitoring isn't enabled yet (no env has a bound app), OR
@@ -167,6 +174,16 @@ export function IssuesListView({
         )}
         <span className="text-xs text-neutral-500">· {filteredByAppName}</span>
         <div className="ml-auto flex items-center gap-2">
+          {project && currentAppId && (
+            <button
+              onClick={() => setManageAlertsOpen(true)}
+              title="Pick who gets pinged (email, Slack, Alby push) when this app fires a new issue or a regression."
+              className="inline-flex items-center gap-1 text-xs px-3 py-1 rounded border border-neutral-800 bg-neutral-900 hover:bg-neutral-800 text-neutral-200"
+            >
+              <Notification size={12} />
+              Manage alerts
+            </button>
+          )}
           <button
             onClick={() => setManageInstallOpen(true)}
             title="Reopen the detector install wizard — re-run Claude, verify the SDK, or fire a test event."
@@ -177,6 +194,14 @@ export function IssuesListView({
           </button>
         </div>
       </div>
+
+      {manageAlertsOpen && project && currentAppId && (
+        <ManageAlertsDialog
+          appId={currentAppId}
+          project={project}
+          onClose={() => setManageAlertsOpen(false)}
+        />
+      )}
 
       {/* Filters row */}
       <div className="flex items-center gap-3 px-6 h-12 border-b border-neutral-900">
@@ -266,6 +291,43 @@ export function IssuesListView({
             </li>
           ))}
         </ul>
+      </div>
+    </div>
+  )
+}
+
+function ManageAlertsDialog({
+  appId,
+  project,
+  onClose,
+}: {
+  appId: string
+  project: Project
+  onClose: () => void
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onClose}>
+      <div
+        className="w-[720px] max-h-[85vh] overflow-y-auto bg-neutral-950 border border-neutral-800 rounded-xl shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-5 pt-4">
+          <div className="flex items-center gap-2">
+            <Notification size={16} className="text-neutral-300" />
+            <h3 className="text-[14px] font-medium text-neutral-100">Manage alerts</h3>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="Close"
+            className="size-8 flex items-center justify-center rounded-md hover:bg-neutral-800 text-neutral-400"
+          >
+            <Close size={14} />
+          </button>
+        </div>
+        <div className="px-5">
+          <AlertsPanel appId={appId} project={project} />
+        </div>
       </div>
     </div>
   )

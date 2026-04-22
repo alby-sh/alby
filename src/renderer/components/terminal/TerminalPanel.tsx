@@ -166,16 +166,13 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     })
 
     // Copy without trailing whitespace (like iTerm2) + Shift+Enter → newline.
-    // By default xterm sends bare \r for every Enter, so Claude/Gemini/Codex
-    // can't tell Shift+Enter apart from plain Enter.
-    //
-    // We send `backslash` then `\r` as two separate writeStdin calls, with a
-    // tiny delay in between. That matches what a user physically typing
-    // `\<Enter>` would produce in the PTY, which is Claude Code's documented
-    // multi-line escape ("type \ then Enter") AND Gemini / Codex treat the
-    // same way. Sending both bytes in one chunk previously tripped a
-    // paste-detection heuristic in newer Claude Code that dropped the
-    // backslash and submitted bare \r, defeating the whole thing.
+    // Neither bare \r, bare \n, ESC+\r, nor bracketed-paste bytes coax
+    // Claude Code v2.1+ into inserting a newline — all four get interpreted
+    // as "submit". The only reliable approach left is to simulate the user
+    // literally typing `\` and then Enter, with a delay long enough between
+    // them that Claude's paste-detection heuristic can't group them. 80ms
+    // is roughly the low end of human typing cadence; any shorter and the
+    // two bytes get treated as a paste and the backslash is dropped.
     term.attachCustomKeyEventHandler((e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'c' && term.hasSelection()) {
         const cleaned = term.getSelection().split('\n').map((l) => l.trimEnd()).join('\n')
@@ -184,18 +181,26 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
         return false // prevent default
       }
       if (
-        e.type === 'keydown' &&
         e.key === 'Enter' &&
         e.shiftKey &&
         !e.metaKey &&
         !e.ctrlKey &&
         !e.altKey
       ) {
-        const writer = kind === 'routine'
-          ? window.electronAPI.routines.writeStdin
-          : window.electronAPI.agents.writeStdin
-        writer(agentId, '\\')
-        setTimeout(() => writer(agentId, '\r'), 15)
+        // Return false for EVERY Shift+Enter variant (keydown/keypress/keyup)
+        // to stop xterm's _keyPress from firing its own \r via
+        // coreService.triggerDataEvent. Without this, the extra \r lands at
+        // the pty a few ms after our byte and turns "newline" into
+        // "newline + submit" in Claude Code.
+        if (e.type === 'keydown') {
+          const writer = kind === 'routine'
+            ? window.electronAPI.routines.writeStdin
+            : window.electronAPI.agents.writeStdin
+          // Bare LF — Claude Code / Gemini / Codex treat CR as submit and
+          // LF as "insert newline". Nothing visible ever hits the display,
+          // so there's no backslash flash like with the `\<Enter>` trick.
+          void writer(agentId, '\n')
+        }
         return false
       }
       return true

@@ -345,7 +345,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // would choke if this file tried to pull it eagerly at module load).
     if (id) {
       import('./unread-store').then(({ useUnreadStore }) => {
-        useUnreadStore.getState().clear(id)
+        useUnreadStore.getState().clear({ projectId: id })
       }).catch(() => { /* ignore */ })
     }
     save(get())
@@ -374,6 +374,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       addingStackForProjectId: null,
       addingEnvironmentForProjectId: null,
     })
+    if (id) {
+      import('./unread-store').then(({ useUnreadStore }) => {
+        useUnreadStore.getState().clear({ stackId: id })
+      }).catch(() => { /* ignore */ })
+    }
     save(get())
   },
   selectEnvironment: (id) => {
@@ -399,6 +404,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       addingStackForProjectId: null,
       addingEnvironmentForProjectId: null,
     })
+    if (id) {
+      import('./unread-store').then(({ useUnreadStore }) => {
+        useUnreadStore.getState().clear({ environmentId: id })
+      }).catch(() => { /* ignore */ })
+    }
     save(get())
   },
   selectTask: (id, environmentId) => {
@@ -501,6 +511,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
   setEnvTab: (envId, tab) => {
     set((state) => ({ envTabs: { ...state.envTabs, [envId]: tab } }))
+    // Clicking a pin row clears its unread dot — the dot's whole job is to
+    // tell you "there's something new here", and you just acknowledged it.
+    import('./unread-store').then(({ useUnreadStore }) => {
+      useUnreadStore.getState().clear({ envPin: { environmentId: envId, pinKey: tab } })
+    }).catch(() => { /* ignore */ })
     save(get())
   },
   savePaneLayout: (taskId, layout) => {

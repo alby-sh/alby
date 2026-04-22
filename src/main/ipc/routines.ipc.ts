@@ -81,6 +81,18 @@ export function registerRoutinesIPC(db: Database.Database, routineManager: Routi
     await safe(() => cloudClient.deleteRoutine(id), undefined)
   })
 
+  // Persist locally then push to cloud. Unlike agents, routine sort_order IS
+  // stored server-side (shared across a team is acceptable — routines are
+  // already shared config), so a fresh device that misses the broadcast still
+  // gets the right order from the next list() call.
+  ipcMain.handle('routines:reorder', async (_, environmentId: string, orderedIds: string[]) => {
+    repo.reorderRoutines(environmentId, orderedIds)
+    try { await cloudClient.reorderRoutines(environmentId, orderedIds) } catch (err) {
+      console.warn('[routines:reorder cloud]', (err as Error).message)
+    }
+    return { ok: true }
+  })
+
   // --- Runtime (local only; tmux on remote server) ---
 
   ipcMain.handle('routines:start', async (event, id: string) => {
