@@ -131,6 +131,18 @@ export function useUpdateIssue() {
   })
 }
 
+export function useDeleteIssue() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: string) => api().issues.delete(id),
+    onSuccess: (_void, id) => {
+      qc.invalidateQueries({ queryKey: ['issues'] })
+      qc.invalidateQueries({ queryKey: ['issue', id] })
+      qc.invalidateQueries({ queryKey: ['issues-open-counts'] })
+    },
+  })
+}
+
 // ---- Releases --------------------------------------------------------------
 
 export function useReleases(appId: string | null) {

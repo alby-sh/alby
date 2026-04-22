@@ -242,11 +242,6 @@ Alby.init({
 // the main process; this adds coverage for anything thrown in the renderer.
 initErrorReporting()
 
-// One-shot end-to-end delivery check so the Alby app can confirm the
-// detector is wired correctly. Safe to leave in — Alby's dashboard will
-// show it as a single "message" event tagged with the current release.
-Alby.captureMessage('Alby detector test event', 'info')
-
 app.whenReady().then(() => {
   // Lock outbound TLS to our allowlisted hosts before anything else kicks
   // off a network request. Must run after `whenReady` because the default

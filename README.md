@@ -32,6 +32,11 @@ Every agent you launch runs inside a `tmux` session on the target machine, so yo
 - **Persistent tmux-backed sessions** that survive disconnects, sleeps and restarts
 - **Live cross-device sync** — pick up exactly where you left off from any Mac you're logged into
 - **Local + remote, side by side** — mix SSH boxes and local folders in the same workspace
+- **Stacks** — group environments by codebase inside a project (website / api / mobile app…), each stack gets its own Overview / Issues / Tasks page
+- **Built-in error monitoring** — every env can enable an Alby reporting app with a one-line snippet; new issues / regressions / every-occurrence push straight into the app (and optionally email, Slack)
+- **Auto-fix for issues** — per-stack opt-in: Alby can spawn Claude / Gemini / Codex against a chosen env to fix incoming issues automatically, capped by a daily budget
+- **Presence** — see which teammates are currently viewing the same project, env or session, live
+- **Deep links** — `alby://issues/<uuid>` opens straight to that issue from an email or Slack link
 - **Scheduled routines** — cron-like recurring agent runs (nightly audits, daily triage, etc.)
 - **Shared with your team** — create teams, invite members, share projects with granular access
 - **Encrypted SSH key vault** — bring your keys once, access all your servers from any device

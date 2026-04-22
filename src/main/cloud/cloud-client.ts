@@ -388,6 +388,10 @@ export const cloudClient = {
   updateIssue(id: string, data: UpdateIssueDTO): Promise<Issue> {
     return request('PATCH', `/api/issues/${id}`, data)
   },
+  /** Hard-delete a resolved issue (server rejects 422 if still open). */
+  deleteIssue(id: string): Promise<void> {
+    return request('DELETE', `/api/issues/${id}`)
+  },
 
   // ---------- Error tracking: Releases ----------
   listReleases(appId: string): Promise<Release[]> {

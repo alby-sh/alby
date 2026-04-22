@@ -56,6 +56,11 @@ export function registerIssuesIPC(db: Database.Database): void {
     return i
   })
 
+  ipcMain.handle('issues:delete', async (_, id: string) => {
+    await cloudClient.deleteIssue(id)
+    mirror(() => repo.delete(id))
+  })
+
   /** Badge count for sidebar — reads straight from cache, no cloud call. */
   ipcMain.handle('issues:open-counts', async (_, appIds: string[]) => {
     const map = repo.openCountByApp(appIds)

@@ -355,7 +355,7 @@ function GitBadges({ status, onAction }: { status: GitStatusData | null; onActio
   )
 }
 
-function GitActionsMenu({ envId, status, x, y, onClose, onRefresh, repoUrl }: { envId: string; status: GitStatusData | null; x: number; y: number; onClose: () => void; onRefresh: () => void; repoUrl: string | null }) {
+function GitActionsMenu({ envId, status, x, y, onClose, onRefresh, repoUrl, isDeployEnv = false }: { envId: string; status: GitStatusData | null; x: number; y: number; onClose: () => void; onRefresh: () => void; repoUrl: string | null; isDeployEnv?: boolean }) {
   const [loading, setLoading] = useState<string | null>(null)
   const [commitMsg, setCommitMsg] = useState('')
   const [showCommitInput, setShowCommitInput] = useState(false)
@@ -636,8 +636,11 @@ function GitActionsMenu({ envId, status, x, y, onClose, onRefresh, repoUrl }: { 
           </div>
         )}
 
-        {/* Pull */}
-        {status.behind > 0 && (
+        {/* Pull — not on deploy envs. Deploy envs pull as part of the
+         *  "Deploy now" pipeline, so exposing a separate Pull Changes here
+         *  would let the user do a half-deploy (pull without the pre/post
+         *  steps) and leave the remote in a weirdly partial state. */}
+        {!isDeployEnv && status.behind > 0 && (
           <div className="px-1 py-1">
             <div className="px-2 h-8 flex items-center cursor-pointer text-[13px] text-neutral-200 hover:bg-neutral-800 rounded transition-colors" onClick={handlePull}>
               {loading === 'pull' ? (
@@ -647,6 +650,11 @@ function GitActionsMenu({ envId, status, x, y, onClose, onRefresh, repoUrl }: { 
               )}
               Pull Changes
             </div>
+          </div>
+        )}
+        {isDeployEnv && status.behind > 0 && (
+          <div className="px-3 py-2 text-[11px] text-neutral-500 italic border-t border-neutral-800">
+            Use "Deploy now" to pull + run the pipeline atomically.
           </div>
         )}
       </div>
@@ -1440,6 +1448,7 @@ function EnvironmentGroup({
       onClose={() => setGitMenu(null)}
       onRefresh={refreshGit}
       repoUrl={repoUrl}
+      isDeployEnv={isDeployEnv}
     />
   ) : null
 

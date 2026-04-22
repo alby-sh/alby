@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
-import { ChevronLeft, Close } from '@carbon/icons-react'
+import { ChevronLeft, Close, TrashCan } from '@carbon/icons-react'
 import { useAppStore } from '../../stores/app-store'
-import { useIssue, useIssueEvents, useUpdateIssue, useApps } from '../../hooks/useIssues'
+import { useIssue, useIssueEvents, useUpdateIssue, useDeleteIssue, useApps } from '../../hooks/useIssues'
 import { useEnvironments } from '../../hooks/useProjects'
 import { useStacks } from '../../hooks/useStacks'
 import type { Issue, IssueEvent, IssueStatus } from '../../../shared/types'
@@ -24,9 +24,12 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
   const { data: stacks } = useStacks(projectId)
   const { data: apps = [] } = useApps(projectId)
   const updateIssue = useUpdateIssue()
+  const deleteIssue = useDeleteIssue()
   const [tab, setTab] = useState<'overview' | 'events' | 'context' | 'breadcrumbs'>('overview')
   const [fixError, setFixError] = useState<string | null>(null)
   const [fixing, setFixing] = useState(false)
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Resolve the stack + target env for this issue. Prefers the env the user
   // installed the detector in (i.e. the app's env), because that's where the
@@ -337,7 +340,93 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
             )}
           </Section>
         )}
+
+        {issue.status === 'resolved' && (
+          <div className="mt-10 border-t border-neutral-900 pt-8">
+            <div className="rounded-lg border border-red-900/60 bg-red-950/20 p-4">
+              <h3 className="text-[14px] font-semibold text-red-300 mb-1">Delete issue</h3>
+              <p className="text-[13px] text-red-400/80 mb-4">
+                Permanently removes the issue record, its events, and breadcrumbs.
+                If the same fingerprint fires again in the future it will come
+                back as a brand-new issue (no regression history). Only available
+                while the issue is resolved — reopen it first if you're not
+                sure.
+              </p>
+              <button
+                type="button"
+                onClick={() => { setDeleteError(null); setShowDeleteConfirm(true) }}
+                disabled={deleteIssue.isPending}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg text-[13px] font-medium bg-red-600/90 hover:bg-red-600 disabled:opacity-60 text-white transition-colors"
+              >
+                <TrashCan size={14} />
+                Delete issue
+              </button>
+              {deleteError && (
+                <p className="mt-2 text-[12px] text-red-300">{deleteError}</p>
+              )}
+            </div>
+          </div>
+        )}
       </div>
+
+      {showDeleteConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm"
+          onClick={() => setShowDeleteConfirm(false)}
+        >
+          <div
+            className="w-[460px] bg-neutral-950 border border-neutral-800 rounded-xl p-5"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center mb-3">
+              <TrashCan size={18} className="text-red-400" />
+              <h3 className="ml-2 text-[14px] font-medium text-neutral-100">Delete this issue?</h3>
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                aria-label="Close"
+                className="ml-auto size-7 flex items-center justify-center rounded-md hover:bg-neutral-800 text-neutral-400"
+              >
+                <Close size={14} />
+              </button>
+            </div>
+            <p className="text-[13px] text-neutral-400 mb-5">
+              Hard-deletes <span className="text-neutral-200">{issue.title}</span>
+              {' '}and all its events. Cannot be undone. If the error fires again
+              it'll appear as a fresh issue.
+            </p>
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowDeleteConfirm(false)}
+                className="h-9 px-4 rounded-md bg-neutral-800 hover:bg-neutral-700 text-neutral-200 text-[13px]"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  deleteIssue.mutate(issue.id, {
+                    onSuccess: () => {
+                      setShowDeleteConfirm(false)
+                      closeDetail()
+                    },
+                    onError: (err) => {
+                      setDeleteError(err instanceof Error ? err.message : String(err))
+                      setShowDeleteConfirm(false)
+                    },
+                  })
+                }}
+                disabled={deleteIssue.isPending}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-md bg-red-600/90 hover:bg-red-600 disabled:opacity-60 text-white text-[13px] font-medium"
+              >
+                <TrashCan size={14} />
+                {deleteIssue.isPending ? 'Deleting…' : 'Delete issue'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
