@@ -100,10 +100,20 @@ export const usePresenceStore = create<PresenceState>((set, get) => ({
   },
 }))
 
+/** Shared sentinel for "no viewers" so every subscribed component sees the
+ *  SAME reference on miss. Returning a fresh `[]` inside the selector was the
+ *  cause of "getSnapshot should be cached" — zustand's useSyncExternalStore
+ *  compares by identity, a new array every call looks like constant churn and
+ *  triggers an infinite re-render loop. */
+const EMPTY_VIEWERS: readonly PresenceUser[] = Object.freeze([])
+
 /** Selector: list of viewers on a given entity. Stable across renders unless
  *  the viewer set actually changes — React-friendly to use in sidebar rows. */
-export function usePresenceFor(entity: 'agent' | 'routine', id: string | null | undefined): PresenceUser[] {
-  return usePresenceStore((s) => (id ? (s.viewers.get(`${entity}.${id}`) ?? []) : []))
+export function usePresenceFor(entity: 'agent' | 'routine', id: string | null | undefined): readonly PresenceUser[] {
+  return usePresenceStore((s) => {
+    if (!id) return EMPTY_VIEWERS
+    return s.viewers.get(`${entity}.${id}`) ?? EMPTY_VIEWERS
+  })
 }
 
 /**

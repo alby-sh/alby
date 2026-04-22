@@ -16,7 +16,7 @@ export function AvatarStack({
   size = 'xs',
   title,
 }: {
-  users: PresenceUser[]
+  users: readonly PresenceUser[]
   max?: number
   size?: keyof typeof SIZES
   title?: string
