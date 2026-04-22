@@ -288,6 +288,7 @@ export function EditEnvironmentView({ environmentId }: Props) {
   const [passwordSyncEnabled, setPasswordSyncEnabled] = useState(false)
   const [keySyncEnabled, setKeySyncEnabled] = useState(false)
   const [remotePath, setRemotePath] = useState('')
+  const [launchCommand, setLaunchCommand] = useState('')
   const [branch, setBranch] = useState('main')
   const [preCommands, setPreCommands] = useState<string[]>([])
   const [postCommands, setPostCommands] = useState<string[]>([])
@@ -312,6 +313,7 @@ export function EditEnvironmentView({ environmentId }: Props) {
     setPasswordSyncEnabled(!!environment.has_synced_password)
     setKeySyncEnabled(!!environment.has_synced_private_key)
     setRemotePath(environment.remote_path ?? '')
+    setLaunchCommand(environment.launch_command ?? '')
     if (environment.deploy_config) {
       setBranch(environment.deploy_config.branch ?? 'main')
       setPreCommands(environment.deploy_config.pre_commands ?? [])
@@ -380,6 +382,7 @@ export function EditEnvironmentView({ environmentId }: Props) {
       ssh_auth_method: isLocal ? undefined : sshAuthMethod,
       ssh_password: !isLocal && sshAuthMethod === 'password' ? sshPassword : null,
       remote_path: trimmedPath,
+      launch_command: launchCommand.trim() ? launchCommand.trim() : null,
     }
 
     // Vault-sync toggles. Password: just flag it on the DTO, the server
@@ -573,6 +576,26 @@ export function EditEnvironmentView({ environmentId }: Props) {
                     Local environments don't sync across devices — sessions live on this Mac only and don't survive an app quit (unlike SSH+tmux).
                   </p>
                 </div>
+              </Section>
+            )}
+
+            {/* LAUNCH COMMAND — operational envs only. Deploy envs shouldn't
+             *  be "launched" locally; they're remote production targets. */}
+            {role === 'operational' && (
+              <Section
+                title="Launch command"
+                description="Optional. The shell command that starts this app / site / service locally (e.g. `npm run dev`, `bundle exec rails s`, `docker compose up`). Right-click this env in the sidebar → Run locally to spawn it in a terminal tab."
+              >
+                <TextInput
+                  value={launchCommand}
+                  onChange={setLaunchCommand}
+                  placeholder="npm run dev"
+                  mono
+                />
+                <p className="mt-2 text-[11px] text-neutral-500">
+                  Runs in this Mac's shell, with the env's folder as cwd.
+                  Leave empty to hide the "Run locally" action.
+                </p>
               </Section>
             )}
 

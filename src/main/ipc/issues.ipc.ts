@@ -61,6 +61,10 @@ export function registerIssuesIPC(db: Database.Database): void {
     mirror(() => repo.delete(id))
   })
 
+  ipcMain.handle('issues:mint-resolve-url', async (_, id: string) => {
+    return cloudClient.mintIssueResolveUrl(id)
+  })
+
   /** Badge count for sidebar — reads straight from cache, no cloud call. */
   ipcMain.handle('issues:open-counts', async (_, appIds: string[]) => {
     const map = repo.openCountByApp(appIds)

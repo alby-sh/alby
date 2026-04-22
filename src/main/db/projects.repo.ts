@@ -136,8 +136,8 @@ export class ProjectsRepo {
     ).m
     this.db
       .prepare(
-        `INSERT INTO environments (id, project_id, name, label, execution_mode, role, platform, ssh_host, ssh_user, ssh_port, ssh_key_path, remote_path, deploy_config, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO environments (id, project_id, name, label, execution_mode, role, platform, ssh_host, ssh_user, ssh_port, ssh_key_path, remote_path, launch_command, deploy_config, sort_order)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         id,
@@ -152,6 +152,7 @@ export class ProjectsRepo {
         data.ssh_port || 22,
         data.ssh_key_path || null,
         data.remote_path,
+        data.launch_command ?? null,
         data.deploy_config ? JSON.stringify(data.deploy_config) : null,
         maxOrder + 1
       )
@@ -342,9 +343,9 @@ export class ProjectsRepo {
         `INSERT INTO environments (
            id, project_id, stack_id, name, label, execution_mode, role, platform,
            ssh_host, ssh_user, ssh_port, ssh_key_path, ssh_auth_method,
-           ssh_password, remote_path,
+           ssh_password, remote_path, launch_command,
            agent_settings, deploy_config, git_remote_url, created_at, sort_order
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, 0))
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, COALESCE(?, datetime('now')), COALESCE(?, 0))
          ON CONFLICT(id) DO UPDATE SET
            project_id = excluded.project_id,
            stack_id = excluded.stack_id,
@@ -363,6 +364,7 @@ export class ProjectsRepo {
            -- security). Overwrite only if the cloud provided a new value.
            ssh_password = COALESCE(excluded.ssh_password, environments.ssh_password),
            remote_path = excluded.remote_path,
+           launch_command = excluded.launch_command,
            agent_settings = excluded.agent_settings,
            deploy_config = excluded.deploy_config,
            git_remote_url = excluded.git_remote_url,
@@ -384,6 +386,7 @@ export class ProjectsRepo {
         e.ssh_auth_method ?? 'key',
         e.ssh_password ?? null,
         e.remote_path,
+        e.launch_command ?? null,
         e.agent_settings ? JSON.stringify(e.agent_settings) : null,
         e.deploy_config ? JSON.stringify(e.deploy_config) : null,
         (e as { git_remote_url?: string | null }).git_remote_url ?? null,

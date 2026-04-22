@@ -77,36 +77,69 @@ function UnreadDot({ size = 8, variant = 'inline' }: { size?: number; variant?: 
   )
 }
 
-/** Thin wrappers that read reactively from the unread-store so a dot appears
- *  the instant an event arrives. Keeps the parent components terser. */
+/* Rendering rule (strict cascade): every level of the sidebar tree only
+ * shows a dot when the LEVEL BELOW IS HIDDEN. Once a parent is expanded and
+ * the child's own dot is visible, the parent's dot is redundant. We pass
+ * `hideWhenExpanded` from the parent so the component stops rendering even
+ * when its data is still "unread". Leaf rows (SessionRow / RoutineRow)
+ * never hide — they're the ground truth. */
+
 function StackUnreadDot({ stackId, hideWhenExpanded }: { stackId: string; hideWhenExpanded?: boolean }) {
-  // Stack rollup: byStack + any stackPin / env / envPin whose denorm
-  // stackId matches. Lets "anything happening inside this collapsed stack"
-  // light up the header even if the direct `byStack` entry was cleared.
+  // Stack rollup: byStack + any stackPin / env / envPin / agent / routine
+  // whose denorm stackId matches.
   const has = useUnreadStore((s) => {
     if (s.byStack[stackId]) return true
     const scan = (rec: Record<string, { stackId?: string }>): boolean =>
       Object.values(rec).some((e) => e.stackId === stackId)
     return scan(s.byStackPin) || scan(s.byEnvironment) || scan(s.byEnvPin)
+      || scan(s.byAgent) || scan(s.byRoutine)
   })
-  // When the stack is expanded the user can see the per-pin dots directly,
-  // so the roll-up on the stack header would be redundant (and visually
-  // noisy). Parent passes `hideWhenExpanded=true` to gate the render.
-  if (!has) return null
-  if (hideWhenExpanded) return null
+  if (!has || hideWhenExpanded) return null
   return <span className="ml-1"><UnreadDot /></span>
 }
-function EnvUnreadDot({ envId }: { envId: string }) {
-  const has = useUnreadStore((s) => !!s.byEnvironment[envId])
-  return has ? <span className="ml-1"><UnreadDot /></span> : null
+function EnvUnreadDot({ envId, hideWhenExpanded }: { envId: string; hideWhenExpanded?: boolean }) {
+  // Env rollup: byEnvironment + any pin / agent / routine that denormalized
+  // this env id. Keeps the env header lit when the user scrolls its pins
+  // into view but hasn't clicked any.
+  const has = useUnreadStore((s) => {
+    if (s.byEnvironment[envId]) return true
+    const scan = (rec: Record<string, { environmentId?: string }>): boolean =>
+      Object.values(rec).some((e) => e.environmentId === envId)
+    return scan(s.byEnvPin) || scan(s.byAgent) || scan(s.byRoutine)
+  })
+  if (!has || hideWhenExpanded) return null
+  return <span className="ml-1"><UnreadDot /></span>
 }
-function PinUnreadDot({ envId, pinKey }: { envId: string; pinKey: EnvPinKey }) {
-  const has = useUnreadStore((s) => !!s.byEnvPin[`${envId}::${pinKey}`])
-  return has ? <span className="ml-1"><UnreadDot /></span> : null
+function PinUnreadDot({ envId, pinKey, hideWhenExpanded }: { envId: string; pinKey: EnvPinKey; hideWhenExpanded?: boolean }) {
+  // Pin rollup: the explicit byEnvPin entry + any leaf (agent / routine)
+  // whose parent matches this env. That way an agent event will light the
+  // Sessions pin even if we only marked byAgent (and vice versa).
+  const has = useUnreadStore((s) => {
+    if (s.byEnvPin[`${envId}::${pinKey}`]) return true
+    if (pinKey === 'sessions' || pinKey === 'terminals') {
+      return Object.values(s.byAgent).some((e) => e.environmentId === envId)
+    }
+    if (pinKey === 'routines') {
+      return Object.values(s.byRoutine).some((e) => e.environmentId === envId)
+    }
+    return false
+  })
+  if (!has || hideWhenExpanded) return null
+  return <span className="ml-1"><UnreadDot /></span>
 }
 function StackPinUnreadDot({ stackId, pinKey }: { stackId: string; pinKey: StackPinKey }) {
+  // Stack pins (Issues / Tasks) are leaves in the UI — when visible they're
+  // the deepest dot that event rolls up to, so no hideWhenExpanded gate.
   const has = useUnreadStore((s) => !!s.byStackPin[`${stackId}::${pinKey}`])
   return has ? <span className="ml-1"><UnreadDot /></span> : null
+}
+function AgentUnreadDot({ agentId }: { agentId: string }) {
+  const has = useUnreadStore((s) => !!s.byAgent[agentId])
+  return has ? <UnreadDot /> : null
+}
+function RoutineUnreadDot({ routineId }: { routineId: string }) {
+  const has = useUnreadStore((s) => !!s.byRoutine[routineId])
+  return has ? <UnreadDot /> : null
 }
 
 export function ContextMenu({ menu, onClose }: { menu: ContextMenuState; onClose: () => void }) {
@@ -303,6 +336,9 @@ function SessionRow({
         style={{ backgroundColor: color }}
       />
       <span className="ml-2 text-[12px] text-neutral-100 truncate flex-1">{title}</span>
+      <span className="ml-2 shrink-0 flex items-center">
+        <AgentUnreadDot agentId={agent.id} />
+      </span>
       {viewers.length > 0 && (
         <span className="ml-2"><AvatarStack users={viewers} /></span>
       )}
@@ -970,7 +1006,16 @@ function PinnedRow({
             {displayLabel}
           </span>
         )}
-        {kind === 'env' && <PinUnreadDot envId={containerId} pinKey={tabKey as EnvPinKey} />}
+        {kind === 'env' && (
+          <PinUnreadDot
+            envId={containerId}
+            pinKey={tabKey as EnvPinKey}
+            // When the pin is expanded the user sees the SessionRow /
+            // RoutineSidebarRow dots directly — hide the rollup dot so we
+            // don't double-up.
+            hideWhenExpanded={!!(expandable && expanded)}
+          />
+        )}
         {kind === 'stack' && <StackPinUnreadDot stackId={containerId} pinKey={tabKey as StackPinKey} />}
         {!expanded && badge && <span className="ml-2 shrink-0">{badge}</span>}
         {/* No always-visible unpin button — too easy to fat-finger. Unpin is
@@ -1202,6 +1247,9 @@ function RoutineSidebarRow({
         {running ? <Stop size={10} /> : <Play size={10} />}
       </button>
       <span className="ml-2 text-[12px] text-neutral-200 truncate flex-1">{routine.name}</span>
+      <span className="ml-2 shrink-0 flex items-center">
+        <RoutineUnreadDot routineId={routine.id} />
+      </span>
       {viewers.length > 0 && (
         <span className="ml-2"><AvatarStack users={viewers} /></span>
       )}
@@ -1499,7 +1547,7 @@ function EnvironmentGroup({
           {envName}
         </span>
         <ConnectionDot envId={envId} />
-        <EnvUnreadDot envId={envId} />
+        <EnvUnreadDot envId={envId} hideWhenExpanded={isExpanded} />
         {!isExpanded && <AgentBadge agents={envAgents} />}
       </div>
       {/* Git status icons sit just LEFT of the role badge, with their own
@@ -1748,7 +1796,11 @@ function StackGroup({
             {stack.kind.replace(/_/g, ' ')}
           </span>
           <StackUnreadDot stackId={stack.id} hideWhenExpanded={expanded} />
-          {openIssues != null && openIssues > 0 && (
+          {/* Issue / task count pills — only when the stack is collapsed.
+           *  When expanded the Issues and Tasks pin rows display their own
+           *  IssuesBadge / task-count, so repeating it on the header is
+           *  visual double-counting. */}
+          {!expanded && openIssues != null && openIssues > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-red-500/20 text-red-300 text-[10px] font-medium tabular-nums shrink-0"
               title={`${openIssues} open issue${openIssues === 1 ? '' : 's'}`}
@@ -1756,7 +1808,7 @@ function StackGroup({
               {openIssues > 99 ? '99+' : openIssues}
             </span>
           )}
-          {openTasks > 0 && (
+          {!expanded && openTasks > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-neutral-700/60 text-neutral-300 text-[10px] font-medium tabular-nums shrink-0"
               title={`${openTasks} open task${openTasks === 1 ? '' : 's'}`}
@@ -1893,6 +1945,9 @@ export function Sidebar() {
   const reorderEnvs = useReorderEnvironments()
   const reorderStacks = useReorderStacks()
   const updateEnv = useUpdateEnvironment()
+  const spawnAgent = useSpawnAgent()
+  const selectTaskAction = useAppStore((s) => s.selectTask)
+  const setActiveAgentAction = useAppStore((s) => s.setActiveAgent)
   const [dragOverEnvId, setDragOverEnvId] = useState<string | null>(null)
   const dragEnvRef = useRef<string | null>(null)
   const dragStackRef = useRef<string | null>(null)
@@ -1995,6 +2050,43 @@ export function Sidebar() {
 
   const agentsByTask = useMemo(() => { const map = new Map<string, Agent[]>(); if (allAgents) { for (const agent of allAgents) { const list = map.get(agent.task_id); if (list) list.push(agent); else map.set(agent.task_id, [agent]) } }; return map }, [allAgents])
 
+  /** Spawn a terminal in the env's general task and type the launch_command
+   *  into it. We resolve-or-create the general task the same way the
+   *  SessionsSubTree placeholder does, then schedule a writeStdin with a
+   *  small delay so the shell has finished its rc files before we type.
+   */
+  const runLaunchCommand = async (env: Environment): Promise<void> => {
+    if (!env.launch_command) return
+    try {
+      let list = (await window.electronAPI.tasks.list(env.id)) as Array<{ id: string; is_default?: 0 | 1 }>
+      let general = list.find((t) => t.is_default === 1)
+      if (!general) {
+        general = (await window.electronAPI.tasks.create({
+          environment_id: env.id,
+          title: 'general',
+        })) as { id: string; is_default?: 0 | 1 }
+        list = [...list, general]
+      }
+      spawnAgent.mutate(
+        { taskId: general.id, agentType: 'terminal', autoInstall: false },
+        {
+          onSuccess: (agent) => {
+            selectTaskAction(general!.id, env.id)
+            setActiveAgentAction(agent.id)
+            // Give the shell its rc-file time then type the command. 600ms is
+            // empirically enough for a login zsh to settle after `-l -i`.
+            setTimeout(() => {
+              window.electronAPI.agents.writeStdin(agent.id, `${env.launch_command}\n`)
+                .catch(() => { /* best-effort — user can retype manually */ })
+            }, 600)
+          },
+        },
+      )
+    } catch (err) {
+      console.error('[Sidebar] runLaunchCommand failed', err)
+    }
+  }
+
   const handleEnvContextMenu = (e: React.MouseEvent, env: Environment) => {
     e.preventDefault(); e.stopPropagation()
     const items: ContextMenuState['items'] = []
@@ -2002,6 +2094,12 @@ export function Sidebar() {
     if (env.label && env.label.includes('.')) {
       const url = env.label.startsWith('http') ? env.label : `https://${env.label}`
       items.push({ label: 'Open Website', onClick: () => window.open(url, '_blank') })
+    }
+    if (env.role !== 'deploy' && env.launch_command) {
+      items.push({
+        label: 'Run locally',
+        onClick: () => { void runLaunchCommand(env) },
+      })
     }
     items.push({ label: 'Rename', onClick: () => setRenamingEnvironment(env) })
     items.push({ label: 'Environment Settings', onClick: () => openEditEnvironment(env.id) })

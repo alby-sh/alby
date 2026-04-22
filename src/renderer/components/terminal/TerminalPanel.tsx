@@ -138,18 +138,38 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
       }
     })
 
-    // Always make the wheel navigate xterm's scrollback, never let xterm's
-    // default behavior fire. Without this xterm would either:
-    //  - convert wheel into arrow-key escape sequences (so Claude Code would
-    //    pop up its prompt history when the user tries to scroll up), or
-    //  - forward the wheel as a mouse-tracking event to the app, which most
-    //    agent CLIs don't actually consume in any useful way.
-    // Returning `false` from the custom handler prevents xterm's default.
+    // Wheel handling has two modes depending on which buffer is active:
+    //  - Primary buffer (plain shell / terminal session): scroll xterm's
+    //    native scrollback with `scrollLines` — the user is reading past
+    //    output that xterm stored in memory.
+    //  - Alternate buffer (Claude Code / Gemini / Codex / vim / less …):
+    //    the app owns the viewport and manages its own history; xterm's
+    //    scrollback is empty here because nothing is spooled. Translate
+    //    the wheel into PageUp/PageDown keypresses so the TUI can do its
+    //    own scrolling (Claude maps these to "scroll conversation",
+    //    Gemini / Codex likewise). This is what finally makes "scroll up
+    //    to re-read" work inside an AI-agent session.
     term.attachCustomWheelEventHandler((e: WheelEvent) => {
       const t = termRef.current
       if (!t) return false
-      // Match macOS native scroll feel: ~3 lines per notch, scaled by deltaY.
-      const lines = Math.sign(e.deltaY) * Math.max(1, Math.min(8, Math.round(Math.abs(e.deltaY) / 16)))
+      const dir = Math.sign(e.deltaY)
+      if (!dir) return false
+      if (t.buffer.active.type === 'alternate') {
+        // PageUp = \x1b[5~ , PageDown = \x1b[6~ — universal DEC / VT
+        // control sequences every TUI understands. We send 1–3 depending
+        // on how hard the user flicked the wheel, so the momentum still
+        // feels right.
+        const pages = Math.max(1, Math.min(3, Math.round(Math.abs(e.deltaY) / 60)))
+        const seq = dir > 0 ? '\x1b[6~' : '\x1b[5~'
+        const writer = kind === 'routine'
+          ? window.electronAPI.routines.writeStdin
+          : window.electronAPI.agents.writeStdin
+        for (let i = 0; i < pages; i++) writer(agentId, seq)
+        return false
+      }
+      // Primary buffer — scroll xterm's own scrollback. Match macOS feel:
+      // ~3 lines per notch, scaled by deltaY.
+      const lines = dir * Math.max(1, Math.min(8, Math.round(Math.abs(e.deltaY) / 16)))
       t.scrollLines(lines)
       return false
     })
@@ -260,20 +280,32 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     }
   }, [agentId])
 
-  // When visibility changes, refit
+  // When visibility changes, refit + refocus. The refit has to run twice:
+  // once on the current RAF so xterm picks up the revealed container size,
+  // and once ~80 ms later because the WebGL renderer re-attaches
+  // asynchronously and clobbers the viewport layout if we only fit once.
+  // Without the double-fit, Claude / Gemini sessions coming back from
+  // behind a different tab had a broken wheel-scroll hit-box (dead pixels
+  // along the right / bottom edges) — fitting twice fixes that.
   useEffect(() => {
-    if (visible && fitRef.current && termRef.current) {
-      requestAnimationFrame(() => {
-        try {
-          fitRef.current?.fit()
-          const term = termRef.current
-          if (term && term.cols > 0 && term.rows > 0) {
-            if (kind === 'routine') window.electronAPI.routines.resize(agentId, term.cols, term.rows)
-            else window.electronAPI.agents.resize(agentId, term.cols, term.rows)
-          }
-        } catch { /* ignore */ }
-      })
+    if (!visible || !fitRef.current || !termRef.current) return
+    const doFit = (): void => {
+      try {
+        fitRef.current?.fit()
+        const term = termRef.current
+        if (term && term.cols > 0 && term.rows > 0) {
+          if (kind === 'routine') window.electronAPI.routines.resize(agentId, term.cols, term.rows)
+          else window.electronAPI.agents.resize(agentId, term.cols, term.rows)
+        }
+      } catch { /* ignore */ }
     }
+    const raf = requestAnimationFrame(doFit)
+    const t = setTimeout(doFit, 80)
+    // Refocus the terminal so keyboard input (arrows / esc / ctrl-c) goes
+    // there instead of whatever DOM element the user was on before
+    // switching tabs.
+    termRef.current.focus()
+    return () => { cancelAnimationFrame(raf); clearTimeout(t) }
   }, [visible, agentId, kind])
 
   // Load WebGL addon lazily, only while this pane is visible. When the pane

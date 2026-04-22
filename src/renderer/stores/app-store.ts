@@ -459,10 +459,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     if (environmentId) update.selectedEnvironmentId = environmentId
     set(update)
+    if (id) {
+      import('./unread-store').then(({ useUnreadStore }) => {
+        useUnreadStore.getState().clear({ routineId: id })
+      }).catch(() => { /* ignore */ })
+    }
     save(get())
   },
   setActiveAgent: (id) => {
     set({ activeAgentId: id })
+    if (id) {
+      // Clicking into a specific session acknowledges whatever event put a
+      // dot on that row.
+      import('./unread-store').then(({ useUnreadStore }) => {
+        useUnreadStore.getState().clear({ agentId: id })
+      }).catch(() => { /* ignore */ })
+    }
     save(get())
   },
   setSidebarWidth: (w) => {

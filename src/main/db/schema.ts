@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS environments (
   ssh_auth_method TEXT NOT NULL DEFAULT 'key',
   ssh_password TEXT,
   remote_path TEXT NOT NULL,
+  launch_command TEXT,
   agent_settings TEXT,
   deploy_config TEXT,
   git_remote_url TEXT,

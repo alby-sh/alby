@@ -157,6 +157,10 @@ export interface Environment {
   has_synced_password?: boolean
   has_synced_private_key?: boolean
   remote_path: string
+  /** Optional shell command to start this app / site / service locally.
+   *  Consumed by the sidebar right-click → "Run locally" action. Null means
+   *  "no launch command configured". */
+  launch_command: string | null
   agent_settings: AgentSettings | null
   deploy_config: DeployConfig | null
   /** Env-level override. When null the stack-level git_remote_url / default_branch apply. */
@@ -243,6 +247,7 @@ export interface CreateEnvironmentDTO {
   ssh_private_key_content?: string
   ssh_private_key_sync_enabled?: boolean
   remote_path: string
+  launch_command?: string | null
   deploy_config?: DeployConfig | null
 }
 
@@ -281,6 +286,7 @@ export interface UpdateEnvironmentDTO {
   ssh_private_key_content?: string | null
   ssh_private_key_sync_enabled?: boolean
   remote_path?: string
+  launch_command?: string | null
   agent_settings?: AgentSettings | null
   deploy_config?: DeployConfig | null
   git_remote_url?: string | null

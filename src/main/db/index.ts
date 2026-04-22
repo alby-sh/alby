@@ -58,6 +58,9 @@ export function initDatabase(): Database.Database {
   if (!envColumns.some((c) => c.name === 'ssh_password')) {
     db.exec('ALTER TABLE environments ADD COLUMN ssh_password TEXT')
   }
+  if (!envColumns.some((c) => c.name === 'launch_command')) {
+    db.exec('ALTER TABLE environments ADD COLUMN launch_command TEXT')
+  }
 
   const taskColumns = db.prepare("PRAGMA table_info('tasks')").all() as { name: string }[]
   if (!taskColumns.some((c) => c.name === 'is_default')) {

@@ -392,6 +392,12 @@ export const cloudClient = {
   deleteIssue(id: string): Promise<void> {
     return request('DELETE', `/api/issues/${id}`)
   },
+  /** Mint a short-lived signed URL the fix agent can POST to when it's
+   *  done, to mark the issue as resolved. The URL's HMAC is the only
+   *  authorization — no Sanctum token travels to the terminal. */
+  mintIssueResolveUrl(id: string): Promise<{ url: string; expires_in_days: number }> {
+    return request('POST', `/api/issues/${id}/resolve-url`)
+  },
 
   // ---------- Error tracking: Releases ----------
   listReleases(appId: string): Promise<Release[]> {

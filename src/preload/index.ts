@@ -349,6 +349,7 @@ const api = {
       ipcRenderer.invoke('issue-events:list', id, page, perPage),
     update: (id: string, data: unknown) => ipcRenderer.invoke('issues:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('issues:delete', id),
+    mintResolveUrl: (id: string) => ipcRenderer.invoke('issues:mint-resolve-url', id),
     openCounts: (appIds: string[]) => ipcRenderer.invoke('issues:open-counts', appIds),
     onLive: (callback: (event: unknown) => void) => {
       const listener = (_: unknown, payload: unknown) => callback(payload)

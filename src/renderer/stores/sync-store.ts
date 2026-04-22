@@ -468,10 +468,14 @@ function handleEntityChanged(
     if (status === 'completed' || status === 'error') {
       markUnreadIfAway(qc, projectId, 'agent.finished', (qc) => {
         const base = resolveAgentScope(qc, payload.id)
-        // Agent events roll up to the Sessions pin inside the env.
+        // Agent events roll up to the Sessions pin inside the env AND mark
+        // the specific session (byAgent leaf) — the sidebar renders the leaf
+        // dot on the session row and gates each parent's dot on collapsed
+        // state, so you only see one dot per visible level.
         if (base.environmentId) {
           base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
         }
+        base.agentId = payload.id
         return base
       })
     }
@@ -489,6 +493,7 @@ function handleEntityChanged(
       if (base.environmentId) {
         base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
       }
+      base.agentId = payload.id
       return base
     })
   }
@@ -498,6 +503,7 @@ function handleEntityChanged(
       if (base.environmentId) {
         base.envPin = { environmentId: base.environmentId, pinKey: 'routines' }
       }
+      base.routineId = payload.id
       return base
     })
   }

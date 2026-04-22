@@ -122,11 +122,22 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
           title: 'general',
         })) as { id: string; is_default?: 0 | 1 }
       }
+      // Mint a signed resolve URL the agent can curl when it pushes the fix
+      // — no Sanctum token leaks through. Best-effort: if the server is
+      // offline we still spawn the agent but without the auto-resolve step.
+      let resolveUrl: string | null = null
+      try {
+        const resp = await window.electronAPI.issues.mintResolveUrl(issue.id) as { url: string }
+        resolveUrl = resp?.url ?? null
+      } catch (err) {
+        console.warn('[fix-agent] could not mint resolve URL:', err)
+      }
       const prompt = buildFixPrompt(
         issue,
         event,
         fixTarget.sourceEnv?.name ?? '?',
         stack?.name ?? 'this project',
+        resolveUrl,
       )
       const agent = (await window.electronAPI.agents.spawn(
         general!.id,
@@ -456,26 +467,83 @@ function buildFixPrompt(
   issue: Issue,
   event: IssueEvent | null,
   sourceEnvName: string,
-  stackName: string
+  stackName: string,
+  resolveUrl: string | null,
 ): string {
   const frames = event?.exception?.frames ?? []
-  const topFrames = frames
-    .slice(0, 6)
-    .map(
-      (f) =>
-        `${f.filename ?? '?'}:${f.lineno ?? '?'}${f.colno ? ':' + f.colno : ''} in ${f.function ?? '?'}`
-    )
-    .join(' / ')
-  const parts = [
+  // Keep more frames (up to 15) and one-per-line so the agent can grep them
+  // without shell-escape weirdness. Minified filenames / offsets are enough
+  // to locate the module in the bundle.
+  const fullStack = frames
+    .slice(0, 15)
+    .map((f) => {
+      const loc = `${f.filename ?? '?'}:${f.lineno ?? '?'}${f.colno ? ':' + f.colno : ''}`
+      return `  - ${loc} in ${f.function ?? '?'}`
+    })
+    .join('\n')
+
+  // Pull whatever the Sentry-style envelope put under `contexts.request`
+  // and `contexts.browser` without assuming a strict shape.
+  const ctx = (event?.contexts ?? {}) as Record<string, unknown>
+  const request = (ctx.request as Record<string, unknown> | undefined) ?? {}
+  const browser = (ctx.browser as Record<string, unknown> | undefined) ?? {}
+  const pageUrl =
+    (typeof request.url === 'string' && request.url) ||
+    (typeof event?.tags?.url === 'string' ? event.tags.url : '') ||
+    ''
+  const userAgent =
+    (typeof request.headers === 'object' && request.headers &&
+      typeof (request.headers as Record<string, unknown>)['User-Agent'] === 'string'
+      ? (request.headers as Record<string, string>)['User-Agent']
+      : '') ||
+    (typeof event?.tags?.['user_agent'] === 'string' ? event.tags['user_agent'] : '') ||
+    ''
+  const browserName = typeof browser.name === 'string' ? browser.name : ''
+  const browserVersion = typeof browser.version === 'string' ? browser.version : ''
+  const browserLine = browserName
+    ? `${browserName}${browserVersion ? ' ' + browserVersion : ''}`
+    : (userAgent || '')
+
+  // Last N user actions before the crash. Keep them concise but include the
+  // category + message + data so "clicked what, opened which modal" shows.
+  const crumbs = (event?.breadcrumbs ?? []).slice(-8).map((b) => {
+    const dataStr = b.data ? ` ${JSON.stringify(b.data).slice(0, 200)}` : ''
+    const label = [b.category ?? b.type ?? 'event', b.message ?? ''].filter(Boolean).join(' · ')
+    return `  - ${b.timestamp ?? ''} ${label}${dataStr}`
+  }).join('\n')
+
+  // Build a shell-friendly multi-line string. The agent's shell quoting
+  // layer handles newlines via the ALBY_INITIAL_PROMPT env var path.
+  const resolveBlock = resolveUrl
+    ? [
+        '',
+        'When you have pushed a fix that you are confident resolves the issue, mark it resolved by running:',
+        '',
+        '```bash',
+        `curl -fsS -X POST '${resolveUrl}' && echo '[alby] issue ${issue.id} marked resolved'`,
+        '```',
+        '',
+        'The URL is signed and expires in 7 days. If the curl fails, the user can still mark it resolved manually from Alby — don\'t block your commit on it.',
+      ].join('\n')
+    : ''
+
+  const lines = [
     `A new error was reported from the "${stackName}" stack (source env: ${sourceEnvName}).`,
-    `Title: ${issue.title}.`,
-    issue.culprit ? `Culprit: ${issue.culprit}.` : '',
+    '',
+    `Issue id: ${issue.id}`,
+    `Title: ${issue.title}`,
+    issue.culprit ? `Culprit: ${issue.culprit}` : '',
     event?.exception
-      ? `Exception type: ${event.exception.type}${event.exception.value ? ' — ' + event.exception.value : ''}.`
+      ? `Exception: ${event.exception.type}${event.exception.value ? ' — ' + event.exception.value : ''}`
       : '',
-    event?.message ? `Message: ${event.message}.` : '',
-    topFrames ? `Top frames: ${topFrames}.` : '',
+    event?.message ? `Message: ${event.message}` : '',
+    pageUrl ? `Page URL: ${pageUrl}` : '',
+    browserLine ? `Browser / UA: ${browserLine}` : '',
+    fullStack ? `\nStack trace (top ${Math.min(frames.length, 15)} frames):\n${fullStack}` : '',
+    crumbs ? `\nLast user actions before the crash:\n${crumbs}` : '',
+    '',
     `Your job: investigate the root cause, apply a minimal correct fix, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT commit placeholder or debug-only changes. If you cannot safely determine a fix without more info, explain exactly what you'd need and stop without committing.`,
+    resolveBlock,
   ]
-  return parts.filter(Boolean).join(' ')
+  return lines.filter((l) => l !== '').join('\n')
 }
