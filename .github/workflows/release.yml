@@ -58,13 +58,20 @@ jobs:
 
       - name: Build + sign + notarize + package
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # electron-builder signing
           CSC_KEYCHAIN: ${{ runner.temp }}/build.keychain
           # electron-builder notarization (via notarytool)
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        # No GH_TOKEN here on purpose. `npm run package` already passes
+        # `--publish never` so electron-builder never auto-uploads — we do the
+        # GitHub release in a dedicated step below via `gh release create`.
+        # Two publish paths (electron-builder auto-publish + manual
+        # `gh release create`) used to race: electron-builder would overwrite
+        # the zip/dmg bytes after the manual upload, but clients that fetched
+        # `latest-mac.yml` between the two uploads would see a checksum the
+        # freshly-overwritten zip no longer matched → sha512 mismatch.
         run: npm run package
 
       - name: Upload artifacts (for non-tag runs)
@@ -76,3 +83,31 @@ jobs:
             dist/*.dmg
             dist/*.zip
             dist/latest-mac.yml
+
+      # Single publish path: `gh release create` with ALL artifacts at once,
+      # including `latest-mac.yml`. Atomic from the auto-updater's point of
+      # view — clients never see a `latest-mac.yml` whose referenced zip
+      # hasn't been uploaded yet. Fails fast if a release already exists for
+      # this tag (e.g. if someone manually `gh release create`d first), so a
+      # duplicate-publish race becomes a visible workflow failure instead of
+      # a silent checksum mismatch for end users.
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          TAG="${GITHUB_REF#refs/tags/}"
+          VERSION="${TAG#v}"
+          gh release create "$TAG" \
+            "dist/Alby-${VERSION}-arm64.dmg" \
+            "dist/Alby-${VERSION}-arm64.dmg.blockmap" \
+            "dist/Alby-${VERSION}-arm64.zip" \
+            "dist/Alby-${VERSION}-arm64.zip.blockmap" \
+            "dist/Alby-${VERSION}-x64.dmg" \
+            "dist/Alby-${VERSION}-x64.dmg.blockmap" \
+            "dist/Alby-${VERSION}-x64.zip" \
+            "dist/Alby-${VERSION}-x64.zip.blockmap" \
+            "dist/latest-mac.yml" \
+            --title "$TAG" \
+            --generate-notes

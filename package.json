@@ -37,8 +37,8 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "postinstall": "electron-builder install-app-deps",
-    "package": "electron-vite build && electron-builder --mac --config electron-builder.yml",
-    "package:universal": "electron-vite build && electron-builder --mac --universal --config electron-builder.yml",
+    "package": "electron-vite build && electron-builder --mac --config electron-builder.yml --publish never",
+    "package:universal": "electron-vite build && electron-builder --mac --universal --config electron-builder.yml --publish never",
     "typecheck:main": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:renderer": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:main && npm run typecheck:renderer"
