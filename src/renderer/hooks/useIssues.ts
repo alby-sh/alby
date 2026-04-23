@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type {
   CreateAppDTO,
   CreateReleaseDTO,
@@ -114,18 +114,86 @@ export function useIssueEvents(issueId: string | null, page = 1) {
   })
 }
 
+/**
+ * Optimistically decrement the cached open-count for `appId` by `delta`.
+ * Used after a local resolve/reopen/delete so the sidebar badge updates
+ * at click-time instead of after the server round-trip + invalidation.
+ * Runs across every `['issues-open-counts', …]` query the cache has,
+ * which is one per distinct project/stack appIds list.
+ */
+function patchOpenCount(qc: QueryClient, appId: string, delta: number): void {
+  const entries = qc.getQueriesData<Record<string, number>>({ queryKey: ['issues-open-counts'] })
+  for (const [key, val] of entries) {
+    if (!val || !(appId in val)) continue
+    qc.setQueryData<Record<string, number>>(key, {
+      ...val,
+      [appId]: Math.max(0, (val[appId] ?? 0) + delta),
+    })
+  }
+}
+
+/**
+ * Optimistically remove `issueId` from every cached issue list for `appId`
+ * whose filter is `status: 'open'`. This is what makes a resolved issue
+ * disappear from the list the instant the user clicks Resolve — without
+ * it, we had a visible lag (sometimes multiple seconds) where the user
+ * thought the action hadn't registered.
+ */
+function patchIssueListRemove(qc: QueryClient, appId: string, issueId: string): void {
+  const entries = qc.getQueriesData<{ data: Issue[]; total: number } & Record<string, unknown>>({
+    queryKey: ['issues', appId],
+  })
+  for (const [key, page] of entries) {
+    if (!page?.data) continue
+    const filtered = page.data.filter((i) => i.id !== issueId)
+    if (filtered.length === page.data.length) continue
+    qc.setQueryData(key, {
+      ...page,
+      data: filtered,
+      total: Math.max(0, (page.total ?? filtered.length) - 1),
+    })
+  }
+}
+
 export function useUpdateIssue() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ id, data }: { id: string; data: UpdateIssueDTO }) => api().issues.update(id, data),
+    // Optimistic patch: before the server round-trip finishes, pull the
+    // resolving issue out of the "open" list and decrement the badge.
+    // The server is authoritative — if the PUT fails we invalidate on
+    // error to refetch truth.
+    onMutate: async ({ id, data }) => {
+      if (data.status && data.status !== 'open') {
+        // Find the issue's app_id so we can patch the right caches. Pulled
+        // from the currently-cached detail (the user is almost always
+        // viewing the issue when they click Resolve).
+        const detail = qc.getQueryData<IssueDetail>(['issue', id])
+        const appId = detail?.issue.app_id
+        if (appId) {
+          patchIssueListRemove(qc, appId, id)
+          patchOpenCount(qc, appId, -1)
+        }
+      } else if (data.status === 'open') {
+        // Reopen: bump counter; the list refetch will drop the row into
+        // place. We don't try to splice it into the list cache because we
+        // don't have the full row shape on hand here.
+        const detail = qc.getQueryData<IssueDetail>(['issue', id])
+        const appId = detail?.issue.app_id
+        if (appId) patchOpenCount(qc, appId, +1)
+      }
+    },
     onSuccess: (issue) => {
-      qc.invalidateQueries({ queryKey: ['issues', issue.app_id] })
-      qc.invalidateQueries({ queryKey: ['issue', issue.id] })
-      // Resolving or reopening flips the open-count. Previous revision didn't
-      // invalidate this, so the sidebar badge would stay stale until the next
-      // 30-second refresh (and after that hook got migrated to React Query,
-      // until the next forced refetch). Invalidate here + sync-store also
-      // invalidates on Reverb so other devices pick up the change.
+      // Force a live refetch (not just "mark stale") so the optimistic
+      // patch gets replaced by server truth quickly, and any list with
+      // a filter we didn't patch (status=resolved / all) catches up too.
+      qc.invalidateQueries({ queryKey: ['issues', issue.app_id], refetchType: 'active' })
+      qc.invalidateQueries({ queryKey: ['issue', issue.id], refetchType: 'active' })
+      qc.invalidateQueries({ queryKey: ['issues-open-counts'], refetchType: 'active' })
+    },
+    onError: () => {
+      // Optimistic patch was wrong — roll back to server truth.
+      qc.invalidateQueries({ queryKey: ['issues'] })
       qc.invalidateQueries({ queryKey: ['issues-open-counts'] })
     },
   })
@@ -135,9 +203,21 @@ export function useDeleteIssue() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (id: string) => api().issues.delete(id),
+    onMutate: async (id) => {
+      const detail = qc.getQueryData<IssueDetail>(['issue', id])
+      const appId = detail?.issue.app_id
+      if (appId) {
+        patchIssueListRemove(qc, appId, id)
+        if (detail?.issue.status === 'open') patchOpenCount(qc, appId, -1)
+      }
+    },
     onSuccess: (_void, id) => {
-      qc.invalidateQueries({ queryKey: ['issues'] })
+      qc.invalidateQueries({ queryKey: ['issues'], refetchType: 'active' })
       qc.invalidateQueries({ queryKey: ['issue', id] })
+      qc.invalidateQueries({ queryKey: ['issues-open-counts'], refetchType: 'active' })
+    },
+    onError: () => {
+      qc.invalidateQueries({ queryKey: ['issues'] })
       qc.invalidateQueries({ queryKey: ['issues-open-counts'] })
     },
   })
@@ -253,5 +333,12 @@ export function useOpenIssueCounts(appIds: string[]) {
     queryFn: async () => api().issues.openCounts(appIds) as unknown as Record<string, number>,
     enabled: appIds.length > 0,
     staleTime: 5_000,
+    // Safety-net polling. Reverb push is best-effort and sometimes misses
+    // on reconnects / flaky wifi; without this, a resolved issue could
+    // stay "visible" in the sidebar badge until the user reloads. 30s is
+    // a good compromise between freshness and cloud-request volume for
+    // a tiny payload like `{appId: count}`.
+    refetchInterval: 30_000,
+    refetchOnWindowFocus: true,
   })
 }

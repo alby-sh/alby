@@ -36,7 +36,16 @@ export class RoutineManager {
   }
 
   private buildLoopScript(routine: Routine, remotePath: string): string {
-    const agentCmd = `${routine.agent_type} --dangerously-skip-permissions -p "${shellEscape(routine.prompt)}"`
+    // Force line-buffered stdout/stderr so the user sees output as soon as the
+    // agent CLI emits each line, instead of one big wall at the end. Without
+    // `stdbuf`, some CLIs (Python-backed ones especially) detect they're not
+    // writing to a real TTY when tmux is in the pipeline and switch to block
+    // buffering — which is what makes a manual routine look frozen for 20+
+    // seconds on first token. `|| …` ensures we degrade gracefully on servers
+    // that don't ship `stdbuf` (busybox / macOS without coreutils).
+    const agentCmd =
+      `(command -v stdbuf >/dev/null && stdbuf -oL -eL ${routine.agent_type} ` +
+      `|| ${routine.agent_type}) --dangerously-skip-permissions -p "${shellEscape(routine.prompt)}"`
     const header = [
       '#!/bin/bash',
       `# Routine: ${routine.name}`,
@@ -49,6 +58,11 @@ export class RoutineManager {
       `cd "${shellEscape(remotePath)}" || { echo "[routine] cd failed"; exit 1; }`,
       `echo -e "\\033[36m[routine] started — using $(command -v ${routine.agent_type} || echo 'NOT FOUND'): ${routine.agent_type}\\033[0m"`,
     ]
+    // Visible "invoking" line + waiting hint. Without this, the agent CLI can
+    // take 10-30s to emit its first token on a cold start and the terminal
+    // looks stuck. The echo is the user's proof the script got past setup.
+    const invokeEcho =
+      `echo -e "\\033[2m[routine] invoking ${routine.agent_type} — first response can take 10–30s on a cold start…\\033[0m"`
     // Manual-only routines (interval null / 0) run the agent once and exit.
     // No while-loop, so the user sees the output and the tmux session
     // naturally closes when the agent finishes — same ergonomics as a
@@ -58,6 +72,7 @@ export class RoutineManager {
       return [
         ...header,
         `echo -e "\\n\\033[36m[routine] manual run at $(date)\\033[0m"`,
+        invokeEcho,
         agentCmd,
         'rc=$?',
         `echo -e "\\033[36m[routine] run finished (exit $rc)\\033[0m"`,
@@ -69,6 +84,7 @@ export class RoutineManager {
       ...header,
       'while true; do',
       `  echo -e "\\n\\033[36m[routine] running at $(date)\\033[0m"`,
+      `  ${invokeEcho}`,
       `  ${agentCmd}`,
       `  rc=$?`,
       `  echo -e "\\033[36m[routine] run finished (exit $rc), sleeping ${interval}s\\033[0m"`,

@@ -203,6 +203,16 @@ function ProjectConnectionDot({ environments }: { environments: Environment[] })
   return <span className={`w-2 h-2 rounded-full shrink-0 ml-1.5 ${color}`} title={label} />
 }
 
+// Prefix used on the tab_name of terminal agents spawned by
+// <LaunchPlayButton>. Everywhere else in the sidebar — Sessions list,
+// auto-expand, agent count badge — we filter these out so the user sees
+// a clean "background" launch that doesn't pollute the session tree.
+// Only LaunchPlayButton itself reads agents-with-this-prefix, to decide
+// whether to render Play or Stop.
+const LAUNCH_TAB_PREFIX = '▶ '
+const isLaunchAgent = (a: Agent): boolean =>
+  !!a.tab_name?.startsWith(LAUNCH_TAB_PREFIX)
+
 // Get all agents across all tasks for an environment
 function useEnvAgents(tasks: Task[] | undefined, agentsByTask: Map<string, Agent[]>): Agent[] {
   return useMemo(() => {
@@ -1051,9 +1061,14 @@ function SessionsSubTree({
   const deleteAgent = useDeleteAgent()
   const killAgent = useKillAgent()
   const sorted = useMemo(() => {
+    // Launch agents (spawned by LaunchPlayButton) are deliberately hidden
+    // from the session tree — they're "background" processes driven by the
+    // play/stop toggle on the env row, not interactive sessions the user
+    // manages directly.
+    const visible = envAgents.filter((a) => !isLaunchAgent(a))
     const arr = filter === 'plain'
-      ? envAgents.filter((a) => (a.tab_name?.split(' ')[0] || 'terminal').toLowerCase() === 'terminal')
-      : [...envAgents]
+      ? visible.filter((a) => (a.tab_name?.split(' ')[0] || 'terminal').toLowerCase() === 'terminal')
+      : [...visible]
     // Honour sort_order the user set via drag or context-menu Move up/down.
     // Falls back to created_at when two rows somehow share the same
     // sort_order (migration race, concurrent inserts from cloud sync).
@@ -1420,19 +1435,52 @@ function RoutineBadge({ envId }: { envId: string }) {
  * store. */
 
 /**
- * Play button that runs the env's `launch_command` as a detached background
- * process. Unlike right-click "Run locally" — which keeps an interactive
- * terminal around so the user can watch output / send input — this is a
- * one-shot "fire and forget": the child process is nohup'd, its stdio
- * redirected to `~/.alby/launch-<envId>.log`, and the owning shell exits
- * straight away. `exit 0` flips the agent's status to completed so the
- * tab auto-closes, leaving only the detached build process alive.
+ * Play/Stop toggle for the env's `launch_command`.
+ *
+ * Behavior:
+ * - When no launch agent is running: spawns a terminal agent, renames its
+ *   tab to `▶ <launch_command>` (so we can recognise it later), and types
+ *   the command into the interactive shell. The pty stays alive for as
+ *   long as the command runs — no `nohup / disown / exit 0` trickery, so
+ *   the tab doesn't vanish before the user can see anything.
+ * - When a launch agent IS running for this env: the icon flips to Stop
+ *   and clicking kills the agent. `agents.kill` also deletes the DB row,
+ *   so the tab disappears the same way it would if the user hit ⌘W.
+ *
+ * The `▶ ` prefix on tab_name is the only state we persist — it survives
+ * reloads and cross-device sync without needing a new DB column. Any
+ * running terminal under this env's default task whose tab_name starts
+ * with the prefix is treated as "the launch agent".
  */
-function LaunchPlayButton({ env }: { env: Environment }) {
+function LaunchPlayButton({ env, envAgents }: { env: Environment; envAgents: Agent[] }) {
   const spawnAgent = useSpawnAgent()
+  const killAgent = useKillAgent()
   const pushToast = useToastStore((s) => s.push)
   const [busy, setBusy] = useState(false)
-  const handleClick = async (e: React.MouseEvent): Promise<void> => {
+
+  // Is there already a running launch agent for this env? If yes, this
+  // button should render as Stop.
+  const runningLaunch = envAgents.find(
+    (a) => a.status === 'running' && isLaunchAgent(a),
+  )
+  const isRunning = !!runningLaunch
+
+  const handleStop = async (e: React.MouseEvent): Promise<void> => {
+    e.stopPropagation()
+    e.preventDefault()
+    if (!runningLaunch || busy) return
+    setBusy(true)
+    try {
+      await killAgent.mutateAsync(runningLaunch.id)
+      pushToast({ message: `Stopped: ${env.launch_command}`, durationMs: 4000 })
+    } catch (err) {
+      pushToast({ message: `Stop failed: ${(err as Error).message}`, durationMs: 8000 })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const handleStart = async (e: React.MouseEvent): Promise<void> => {
     e.stopPropagation()
     e.preventDefault()
     if (!env.launch_command || busy) return
@@ -1445,30 +1493,31 @@ function LaunchPlayButton({ env }: { env: Environment }) {
           environment_id: env.id,
           title: 'general',
         })) as { id: string; is_default?: 0 | 1 }
-        list = [...list, general]
       }
-      const shortEnv = env.id.slice(0, 8)
-      // Escape single quotes so the launch command survives being wrapped in
-      // a single-quoted bash -c '<cmd>' argument. Classic `'\''` trick.
-      const esc = env.launch_command.replace(/'/g, `'\\''`)
-      const detached = [
-        `mkdir -p "$HOME/.alby"`,
-        `nohup bash -c '${esc}' > "$HOME/.alby/launch-${shortEnv}.log" 2>&1 & disown`,
-        `echo "[alby] launched '${esc}' in background — log at ~/.alby/launch-${shortEnv}.log"`,
-        `exit 0`,
-      ].join(' && ')
       spawnAgent.mutate(
         { taskId: general.id, agentType: 'terminal', autoInstall: false },
         {
           onSuccess: (agent) => {
-            // Wait for the shell's rc-file load before typing — same 600 ms
-            // settle the right-click path uses.
+            // Tag this agent so we recognise it as the env's launch agent
+            // on future renders (and can flip the button to Stop). The
+            // command itself is truncated into the title for readability.
+            const shortCmd = env.launch_command!.length > 48
+              ? env.launch_command!.slice(0, 45) + '…'
+              : env.launch_command!
+            void window.electronAPI.agents.update(agent.id, {
+              tab_name: `${LAUNCH_TAB_PREFIX}${shortCmd}`,
+            })
+            // Type the command into the interactive shell. No `exit` —
+            // the pty stays alive while the command runs, so the user can
+            // see output (by clicking into the session from the sidebar)
+            // and the tab doesn't auto-close on us. 600ms is enough for
+            // a login bash/zsh to settle after -l.
             setTimeout(() => {
-              void window.electronAPI.agents.writeStdin(agent.id, `${detached}\n`)
+              void window.electronAPI.agents.writeStdin(agent.id, `${env.launch_command}\n`)
             }, 600)
             pushToast({
-              message: `Launched in background — log at ~/.alby/launch-${shortEnv}.log`,
-              durationMs: 6000,
+              message: `Launched: ${env.launch_command}`,
+              durationMs: 4000,
             })
           },
           onError: (err) => {
@@ -1482,15 +1531,24 @@ function LaunchPlayButton({ env }: { env: Environment }) {
       setBusy(false)
     }
   }
+
   return (
     <button
       type="button"
-      onClick={handleClick}
+      onClick={isRunning ? handleStop : handleStart}
       disabled={busy}
-      title={`Run launch command in background\n\n${env.launch_command}\n\nOutput → ~/.alby/launch-${env.id.slice(0, 8)}.log`}
-      className="shrink-0 w-6 h-6 mr-1 flex items-center justify-center rounded text-emerald-400 hover:bg-emerald-900/30 disabled:opacity-50 transition-colors"
+      title={
+        isRunning
+          ? `Stop launch command\n\n${env.launch_command}`
+          : `Run launch command\n\n${env.launch_command}`
+      }
+      className={`shrink-0 w-6 h-6 mr-1 flex items-center justify-center rounded disabled:opacity-50 transition-colors ${
+        isRunning
+          ? 'text-red-400 hover:bg-red-900/30'
+          : 'text-emerald-400 hover:bg-emerald-900/30'
+      }`}
     >
-      <Play size={12} />
+      {isRunning ? <Stop size={12} /> : <Play size={12} />}
     </button>
   )
 }
@@ -1510,7 +1568,11 @@ function EnvironmentGroup({
   environment: Environment
   agentsByTask: Map<string, Agent[]>
   search: string
-  onContextMenu: (e: React.MouseEvent, env: Environment) => void
+  onContextMenu: (
+    e: React.MouseEvent,
+    env: Environment,
+    opts?: { runningLaunchAgent?: Agent | null },
+  ) => void
   setContextMenu: (menu: ContextMenuState) => void
   isDragOver?: boolean
   onEnvDragStart?: (e: React.DragEvent) => void
@@ -1546,7 +1608,22 @@ function EnvironmentGroup({
   }
   const isDeployEnv = environment.role === 'deploy'
   const envAgents = useEnvAgents(tasks, agentsByTask)
-  const hasRunning = envAgents.some((a) => a.status === 'running')
+  // Launch agents are hidden from the session list, so they must not
+  // trigger auto-expand of the env (that would pop open an empty subtree)
+  // or count toward the badge glyphs next to the env/Sessions pin.
+  const visibleAgents = useMemo(
+    () => envAgents.filter((a) => !isLaunchAgent(a)),
+    [envAgents],
+  )
+  // The currently-running launch agent for this env, if any. Shared
+  // between LaunchPlayButton (play↔stop toggle) and the right-click
+  // context menu ("View launch terminal" item, visible only while it's
+  // actually running).
+  const runningLaunch = useMemo(
+    () => envAgents.find((a) => a.status === 'running' && isLaunchAgent(a)) ?? null,
+    [envAgents],
+  )
+  const hasRunning = visibleAgents.some((a) => a.status === 'running')
   const pinOrder = useAppStore((s) => s.pinOrder)
   const envTabs = useAppStore((s) => s.envTabs)
   const setEnvTab = useAppStore((s) => s.setEnvTab)
@@ -1591,7 +1668,7 @@ function EnvironmentGroup({
       className={`group relative flex items-center h-9 px-2 ${onEnvDragStart ? 'cursor-grab active:cursor-grabbing' : ''} rounded-lg transition-colors ${isDragOver ? 'border-t-2 border-blue-500' : ''} ${
         isSelectedAsEnv ? 'bg-neutral-800/60' : 'hover:bg-neutral-800/30'
       }`}
-      onContextMenu={(e) => onContextMenu(e, environment)}
+      onContextMenu={(e) => onContextMenu(e, environment, { runningLaunchAgent: runningLaunch })}
     >
       <button
         type="button"
@@ -1625,7 +1702,7 @@ function EnvironmentGroup({
         </span>
         <ConnectionDot envId={envId} />
         <EnvUnreadDot envId={envId} hideWhenExpanded={isExpanded} />
-        {!isExpanded && <AgentBadge agents={envAgents} />}
+        {!isExpanded && <AgentBadge agents={visibleAgents} />}
       </div>
       {/* Git status icons sit just LEFT of the role badge, with their own
        *  horizontal breathing room. The badge itself is the rightmost element,
@@ -1634,7 +1711,7 @@ function EnvironmentGroup({
         <GitBadges status={gitStatus} onAction={openGitMenu} />
       </div>
       {!isDeployEnv && environment.launch_command && (
-        <LaunchPlayButton env={environment} />
+        <LaunchPlayButton env={environment} envAgents={envAgents} />
       )}
       <span
         className={`shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded border ${
@@ -1697,7 +1774,7 @@ function EnvironmentGroup({
           : undefined
         const badge =
           tabKey === 'sessions' || tabKey === 'terminals' ? (
-            <SessionBadge agents={envAgents} />
+            <SessionBadge agents={visibleAgents} />
           ) : tabKey === 'routines' ? (
             <RoutineBadge envId={envId} />
           ) : null
@@ -2167,7 +2244,11 @@ export function Sidebar() {
     }
   }
 
-  const handleEnvContextMenu = (e: React.MouseEvent, env: Environment) => {
+  const handleEnvContextMenu = (
+    e: React.MouseEvent,
+    env: Environment,
+    opts?: { runningLaunchAgent?: Agent | null },
+  ) => {
     e.preventDefault(); e.stopPropagation()
     const items: ContextMenuState['items'] = []
     // Show "Open Website" if the environment label looks like a domain
@@ -2179,6 +2260,20 @@ export function Sidebar() {
       items.push({
         label: 'Run locally',
         onClick: () => { void runLaunchCommand(env) },
+      })
+    }
+    // "View launch terminal" only shows up when a launch agent is actually
+    // running for this env — otherwise there's nothing to reveal. The
+    // launch agent is hidden from the session list by design, so this is
+    // the only way the user can peek at its output to debug a build.
+    const runningLaunch = opts?.runningLaunchAgent
+    if (runningLaunch) {
+      items.push({
+        label: 'View launch terminal',
+        onClick: () => {
+          selectTaskAction(runningLaunch.task_id, env.id)
+          setActiveAgentAction(runningLaunch.id)
+        },
       })
     }
     items.push({ label: 'Rename', onClick: () => setRenamingEnvironment(env) })

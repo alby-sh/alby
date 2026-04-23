@@ -156,6 +156,22 @@ export function MainArea() {
   const { data: agents } = useAgents(selectedTaskId)
   const { data: allAgents } = useAllAgents()
   const { data: environment } = useEnvironment(selectedEnvironmentId)
+
+  // Launch agents (spawned by the sidebar Play/Stop toggle on the env
+  // row) are kept hidden from the tab bar by default — they're background
+  // processes, not regular sessions. They become "visible" (i.e. join the
+  // tab bar) only when the user explicitly surfaces one via the sidebar's
+  // right-click → "View launch terminal" action, which adds the agent to
+  // tabOrder. Once surfaced, the agent behaves like any other tab: closing
+  // the X kills it (same as any other session); the Play/Stop button on
+  // the env row stays authoritative for starting/stopping the process.
+  const visibleAgents = useMemo(
+    () =>
+      (agents ?? []).filter(
+        (a) => !a.tab_name?.startsWith('▶ ') || tabOrder.includes(a.id),
+      ),
+    [agents, tabOrder],
+  )
   const spawnAgent = useSpawnAgent()
   const killAgent = useKillAgent()
   const deleteAgent = useDeleteAgent()
@@ -195,9 +211,22 @@ export function MainArea() {
     if (!agents) return
     const ids = new Set(agents.map((a) => a.id))
 
+    // A hidden launch agent should join the tab bar only when the user
+    // explicitly revealed it via "View launch terminal" (which sets
+    // activeAgentId to the launch id). We read activeAgentId at effect
+    // time — adding it as a dep would trigger a render storm on every
+    // click, and the deliberate "surface on reveal" path always lands
+    // here via a task-change refetch anyway.
+    const activeAtRun = useAppStore.getState().activeAgentId
     setTabOrder((prev) => {
       const kept = prev.filter((id) => ids.has(id))
-      const added = agents.filter((a) => !prev.includes(a.id)).map((a) => a.id)
+      const added = agents
+        .filter((a) => {
+          if (prev.includes(a.id)) return false
+          if (!a.tab_name?.startsWith('▶ ')) return true
+          return a.id === activeAtRun
+        })
+        .map((a) => a.id)
       const next = [...kept, ...added]
       // Only update if actually changed
       if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev
@@ -216,9 +245,14 @@ export function MainArea() {
     }
 
     // Clean up panes that no longer exist, or restore saved layout for this task
+    // NB: the fallback-to-first-agent logic must pick the first *visible*
+    // agent, not agents[0] — a hidden launch agent spawned by the sidebar
+    // play button would otherwise become the active pane when the user
+    // simply selects the task.
+    const firstVisible = agents.find((a) => !a.tab_name?.startsWith('▶ '))
     setPanes((prev) => {
-      // No agents for this task — clear panes so launcher shows
-      if (agents.length === 0) return []
+      // No (visible) agents for this task — clear panes so launcher shows.
+      if (!firstVisible) return []
 
       if (prev.length === 0 || !prev.some((id) => ids.has(id))) {
         // No valid panes — if the user has an activeAgentId that belongs to
@@ -233,7 +267,7 @@ export function MainArea() {
         }
 
         // No valid panes — check if we have a saved layout for this task
-        const taskId = agents[0]?.task_id
+        const taskId = firstVisible.task_id
         if (taskId) {
           const saved = getPaneLayout(taskId)
           if (saved) {
@@ -244,13 +278,13 @@ export function MainArea() {
             }
           }
         }
-        // No saved layout — show the first agent
-        return [agents[0].id]
+        // No saved layout — show the first visible agent
+        return [firstVisible.id]
       }
       if (prev.every((id) => ids.has(id))) return prev // nothing to clean
       const cleaned = prev.filter((id) => ids.has(id))
       if (cleaned.length > 0) return cleaned
-      return [agents[0].id]
+      return [firstVisible.id]
     })
   }, [agents, setActiveAgent, getPaneLayout])
 
@@ -297,7 +331,7 @@ export function MainArea() {
       if (isLauncherActive) {
         setLauncherOpen(false)
         if (panes.length > 0) setActiveAgent(panes[Math.min(activePaneIndex, panes.length - 1)])
-        else if (agents?.length) setActiveAgent(agents[agents.length - 1].id)
+        else if (visibleAgents.length) setActiveAgent(visibleAgents[visibleAgents.length - 1].id)
         else setActiveAgent(null)
       } else if (activeAgentId && agents) {
         // Don't close pinned tabs with Cmd+W
@@ -327,7 +361,9 @@ export function MainArea() {
   })
 
   const isLauncherActive = launcherOpen && activeAgentId === LAUNCHER_TAB_ID
-  const hasNoAgents = !agents || agents.length === 0
+  // Launcher placeholder should appear when no *visible* sessions exist —
+  // a running launch agent behind the scenes shouldn't block it.
+  const hasNoAgents = visibleAgents.length === 0
   const showPanes = panes.length > 0 && !isLauncherActive
 
   // Auto-close tabs when agent exits cleanly (tmux is already dead on the server).
@@ -355,9 +391,11 @@ export function MainArea() {
     setPanes((prev) => {
       const next = prev.filter((id) => !closeSet.has(id))
       if (next.length === prev.length) return prev // nothing changed
-      // If all panes were closed, pick the first remaining agent
+      // If all panes were closed, pick the first remaining *visible*
+      // agent — picking a hidden launch agent here would surface it as
+      // the focused tab, defeating the whole "run in background" idea.
       if (next.length === 0 && agents.length > toClose.length) {
-        const remaining = agents.find((a) => !closeSet.has(a.id))
+        const remaining = visibleAgents.find((a) => !closeSet.has(a.id))
         if (remaining) {
           setActiveAgent(remaining.id)
           return [remaining.id]
@@ -506,7 +544,7 @@ export function MainArea() {
   const handleCloseLauncher = () => {
     setLauncherOpen(false)
     if (panes.length > 0) setActiveAgent(panes[Math.min(activePaneIndex, panes.length - 1)])
-    else if (agents?.length) setActiveAgent(agents[agents.length - 1].id)
+    else if (visibleAgents.length) setActiveAgent(visibleAgents[visibleAgents.length - 1].id)
     else setActiveAgent(null)
   }
 
@@ -872,7 +910,7 @@ export function MainArea() {
       )}
 
       <TerminalTabs
-        agents={agents || []} tabOrder={tabOrder} panes={panes} activePaneIndex={activePaneIndex}
+        agents={visibleAgents} tabOrder={tabOrder} panes={panes} activePaneIndex={activePaneIndex}
         agentActivities={activities} onSelectAgent={handleSelectAgent}
         onKillAgent={(id) => killAgent.mutate(id)} onCloseAgent={handleCloseAgent}
         onNewAgent={handleNewTab} onReorderTabs={handleReorderTabs}

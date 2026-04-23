@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Add, Close, Launch, List, Pin, PinFilled, Settings, Time } from '@carbon/icons-react'
+import { Add, Close, Debug, Launch, List, Pin, PinFilled, Settings, Time } from '@carbon/icons-react'
 import { useProjects, useUpdateProject } from '../../hooks/useProjects'
 import { useAllAgents } from '../../hooks/useAgents'
+import { useApps, useOpenIssueCounts } from '../../hooks/useIssues'
 import { useActivityStore } from '../../stores/activity-store'
 import { UserAvatar } from '../ui/UserAvatar'
 import { useAppStore } from '../../stores/app-store'
@@ -41,6 +42,53 @@ function MembersStack({ members }: { members: ProjectMember[] | undefined }) {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * Aggregated open-issue count for a single project row. Each row fetches
+ * its own `useApps(projectId)` + `useOpenIssueCounts(appIds)` — the same
+ * hook pair the sidebar uses, so React Query dedupes across mounts and
+ * Reverb invalidations flip both places at once. N×2 queries is fine at
+ * project-table sizes (tens, not thousands) and keeps the cell dumb
+ * without threading data through the parent.
+ */
+function ProjectIssueCell({ projectId, onOpen }: { projectId: string; onOpen: () => void }) {
+  const { data: apps } = useApps(projectId)
+  const appIds = useMemo(
+    () => (apps ?? []).map((a) => a.id).sort(),
+    [apps],
+  )
+  const { data: counts } = useOpenIssueCounts(appIds)
+  const total = useMemo(() => {
+    if (!counts) return null
+    return Object.values(counts).reduce((sum, n) => sum + (n || 0), 0)
+  }, [counts])
+
+  if (appIds.length === 0) {
+    return <span className="text-neutral-600 text-[12px]">—</span>
+  }
+  if (total == null) {
+    return <span className="text-neutral-600 text-[12px]">…</span>
+  }
+  if (total === 0) {
+    return (
+      <span className="inline-flex items-center gap-1 text-[12px] text-neutral-500">
+        <Debug size={12} />
+        <span>0</span>
+      </span>
+    )
+  }
+  return (
+    <button
+      type="button"
+      onClick={(e) => { e.stopPropagation(); onOpen() }}
+      title={`${total} open issue${total === 1 ? '' : 's'} — click to open`}
+      className="inline-flex items-center gap-1 text-[12px] text-red-300 hover:text-red-200 hover:bg-red-500/10 rounded px-1.5 py-0.5 transition-colors"
+    >
+      <Debug size={12} />
+      <span className="font-medium tabular-nums">{total}</span>
+    </button>
   )
 }
 
@@ -223,6 +271,7 @@ export function AllProjectsView() {
                   <th className="px-2 py-1.5 text-left font-medium">Name</th>
                   <th className="px-2 py-1.5 text-left font-medium">URL</th>
                   <th className="w-24 px-2 py-1.5 text-left font-medium">Active</th>
+                  <th className="w-20 px-2 py-1.5 text-left font-medium">Issues</th>
                   <th className="px-2 py-1.5 text-left font-medium">Members</th>
                   <th className="w-44 px-2 py-1.5 text-right font-medium"></th>
                 </tr>
@@ -230,7 +279,7 @@ export function AllProjectsView() {
               <tbody>
                 {filtered.length === 0 && (
                   <tr>
-                    <td colSpan={6} className="px-3 py-10 text-center text-neutral-500">
+                    <td colSpan={7} className="px-3 py-10 text-center text-neutral-500">
                       {query ? 'No projects match.' : 'No projects yet.'}
                     </td>
                   </tr>
@@ -296,6 +345,12 @@ export function AllProjectsView() {
                           </div>
                         )
                       })()}
+                    </td>
+                    <td className="px-2 py-1.5 align-middle">
+                      <ProjectIssueCell
+                        projectId={project.id}
+                        onOpen={() => handleOpen(project)}
+                      />
                     </td>
                     <td className="px-2 py-1.5 align-middle">
                       <MembersStack members={project.members} />

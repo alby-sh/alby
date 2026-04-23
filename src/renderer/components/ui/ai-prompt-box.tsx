@@ -378,11 +378,53 @@ const PromptInputTextarea: React.FC<
         : `min(${textareaRef.current.scrollHeight}px, ${maxHeight})`
   }, [maxHeight, disableAutosize, value])
 
+  // Terminal-style line/word jumps. macOS `<textarea>` already handles Cmd+←/→
+  // natively, but Chromium does NOT handle Ctrl+←/→ on Linux/Windows the way
+  // the user expects from a terminal (line-start/end). We implement both
+  // explicitly so the behaviour is uniform across platforms, and also cover
+  // Cmd/Ctrl+↑/↓ as "jump to top/bottom of the textarea".
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>): void => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
       onSubmit?.()
+      return
     }
+
+    const modifier = e.metaKey || e.ctrlKey
+    if (modifier && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const ta = e.currentTarget
+      const val = ta.value
+      const caret = e.shiftKey ? ta.selectionEnd : ta.selectionStart
+      let target = caret
+      if (e.key === 'ArrowLeft') {
+        // Line start: scan back to previous \n (not including it).
+        const prev = val.lastIndexOf('\n', Math.max(0, caret - 1))
+        target = prev === -1 ? 0 : prev + 1
+      } else if (e.key === 'ArrowRight') {
+        // Line end: next \n or end of text.
+        const next = val.indexOf('\n', caret)
+        target = next === -1 ? val.length : next
+      } else if (e.key === 'ArrowUp') {
+        target = 0
+      } else if (e.key === 'ArrowDown') {
+        target = val.length
+      }
+
+      e.preventDefault()
+      if (e.shiftKey) {
+        // Extend selection from the original anchor (selectionStart stays
+        // put; we move selectionEnd). The browser's native direction-aware
+        // extension is not available — this approximation is close enough
+        // for prompt-length text and matches what iTerm / most terminals do.
+        const anchor = ta.selectionDirection === 'backward' ? ta.selectionEnd : ta.selectionStart
+        ta.setSelectionRange(Math.min(anchor, target), Math.max(anchor, target))
+      } else {
+        ta.setSelectionRange(target, target)
+      }
+      onKeyDown?.(e)
+      return
+    }
+
     onKeyDown?.(e)
   }
 
