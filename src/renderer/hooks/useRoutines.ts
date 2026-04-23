@@ -67,10 +67,22 @@ export function useReorderRoutines() {
   })
 }
 
+/**
+ * Start a routine. Accepts either a plain routine id (the common case used by
+ * the quick-start Play buttons in the sidebar) or `{ id, extraInput }` when
+ * the user typed one-off context into the RoutineView textarea before
+ * pressing Start. `extraInput` is appended to the stored prompt and only
+ * honoured for manual routines — the backend ignores it for cron/interval ones.
+ */
 export function useStartRoutine() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (id: string) => api().routines.start(id) as Promise<Routine>,
+    mutationFn: (variables: string | { id: string; extraInput?: string }) => {
+      const { id, extraInput } = typeof variables === 'string'
+        ? { id: variables, extraInput: undefined }
+        : variables
+      return api().routines.start(id, extraInput) as Promise<Routine>
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['routines'] })
       qc.invalidateQueries({ queryKey: ['routines-all'] })

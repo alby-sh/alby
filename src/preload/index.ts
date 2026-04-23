@@ -77,7 +77,18 @@ const api = {
   agents: {
     list: (taskId: string) => ipcRenderer.invoke('agents:list', taskId),
     listAll: () => ipcRenderer.invoke('agents:list-all'),
-    spawn: (taskId: string, agentType?: string, autoInstall?: boolean, initialPrompt?: string) => ipcRenderer.invoke('agents:spawn', taskId, agentType, autoInstall, initialPrompt),
+    /** `kind` is an optional hint about WHY this agent is being spawned.
+     *  Currently only `'auto-fix'` is recognised — it swaps the default
+     *  "delegate git/push to Alby's UI" rule in the system prompt for an
+     *  explicit "you are authorised to commit, push and curl the signed
+     *  resolve URL yourself" block. See `agent-manager.buildSystemPrompt`. */
+    spawn: (
+      taskId: string,
+      agentType?: string,
+      autoInstall?: boolean,
+      initialPrompt?: string,
+      kind?: 'auto-fix',
+    ) => ipcRenderer.invoke('agents:spawn', taskId, agentType, autoInstall, initialPrompt, kind),
     getContext: (agentId: string) => ipcRenderer.invoke('agents:get-context', agentId),
     kill: (agentId: string) => ipcRenderer.invoke('agents:kill', agentId),
     delete: (agentId: string) => ipcRenderer.invoke('agents:delete', agentId),
@@ -161,6 +172,14 @@ const api = {
       }
     }
   },
+  /** v0.8.3: this install's device identity — stable UUID + OS hostname.
+   *  The renderer fetches this once at boot and stashes it on auth-store so
+   *  the sidebar can compare `agent.device_id === ourDeviceId` at render
+   *  time without a round-trip for every row. */
+  device: {
+    info: (): Promise<{ device_id: string; device_name: string }> =>
+      ipcRenderer.invoke('device:info'),
+  },
   routines: {
     list: () => ipcRenderer.invoke('routines:list'),
     listByEnv: (envId: string) => ipcRenderer.invoke('routines:list-by-env', envId),
@@ -169,7 +188,7 @@ const api = {
     update: (id: string, data: unknown) => ipcRenderer.invoke('routines:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('routines:delete', id),
     reorder: (envId: string, orderedIds: string[]) => ipcRenderer.invoke('routines:reorder', envId, orderedIds),
-    start: (id: string) => ipcRenderer.invoke('routines:start', id),
+    start: (id: string, extraInput?: string) => ipcRenderer.invoke('routines:start', id, extraInput),
     stop: (id: string) => ipcRenderer.invoke('routines:stop', id),
     writeStdin: (id: string, data: string) => ipcRenderer.invoke('routines:write-stdin', id, data),
     resize: (id: string, cols: number, rows: number) => ipcRenderer.invoke('routines:resize', id, cols, rows),
@@ -371,11 +390,15 @@ const api = {
     listMine: (page?: number, perPage?: number) => ipcRenderer.invoke('issues:list-mine', page, perPage),
     mintResolveUrl: (id: string) => ipcRenderer.invoke('issues:mint-resolve-url', id),
     openCounts: (appIds: string[]) => ipcRenderer.invoke('issues:open-counts', appIds),
-    /** v0.8.2: (re)run the local `claude` CLI to compose a structured
-     *  markdown analysis on the issue. `extraInstruction` is an optional
-     *  turn from the user to steer refinement. */
-    generateAnalysis: (id: string, extraInstruction?: string) =>
-      ipcRenderer.invoke('issues:generate-analysis', id, extraInstruction),
+    /** v0.8.2: (re)run the `claude` CLI to compose a structured markdown
+     *  analysis on the issue. `extraInstruction` is an optional turn from the
+     *  user to steer refinement. `envId`, when provided, routes the CLI run
+     *  through that env — over SSH for remote envs (so claude runs on the
+     *  box where the user actually has it installed), or via the user's
+     *  login shell for local envs (so nvm/brew PATH is picked up even when
+     *  Alby was launched from /Applications). */
+    generateAnalysis: (id: string, extraInstruction?: string, envId?: string) =>
+      ipcRenderer.invoke('issues:generate-analysis', id, extraInstruction, envId),
     onLive: (callback: (event: unknown) => void) => {
       const listener = (_: unknown, payload: unknown) => callback(payload)
       ipcRenderer.on('issues:live', listener)

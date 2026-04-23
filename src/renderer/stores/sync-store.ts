@@ -3,7 +3,7 @@ import Pusher, { type Channel } from 'pusher-js'
 import { useQueryClient, type QueryClient } from '@tanstack/react-query'
 import { useEffect } from 'react'
 import { useAuthStore } from './auth-store'
-import { useUnreadStore, type UnreadScope, type UnreadReason, type EnvPinKey } from './unread-store'
+import { useUnreadStore, type UnreadScope, type UnreadReason, type UnreadLeafContext } from './unread-store'
 import { useAppStore } from './app-store'
 import type { Agent, Environment, ReportingApp, Routine, Task } from '../../shared/types'
 
@@ -49,12 +49,17 @@ function markUnreadIfAway(
   useUnreadStore.getState().mark(scope, reason)
 }
 
-/** Walk the TanStack cache to find the env + stack an entity belongs to. */
-function resolveAgentScope(qc: QueryClient, agentId: string): Partial<UnreadScope> {
+/**
+ * Walk the TanStack cache to build the `{projectId, stackId, environmentId}`
+ * chain for an agent id. Used as the denorm-parent context attached to the
+ * byAgent leaf via `markLeaf` — all parent-level sidebar dots (project icon,
+ * stack header, env row, Sessions pin) light up via the rollup scans that
+ * filter by those ids.
+ */
+function resolveAgentContext(qc: QueryClient, agentId: string): UnreadLeafContext {
   const all = qc.getQueryData<Agent[]>(['agents-all'])
   const agent = all?.find((a) => a.id === agentId)
   if (!agent) return {}
-  // agents-all already carries project_id via JOIN, so use that directly.
   const projectId = agent.project_id
   const taskCaches = findTaskCachesByProject(qc, projectId)
   let envId: string | undefined
@@ -62,58 +67,54 @@ function resolveAgentScope(qc: QueryClient, agentId: string): Partial<UnreadScop
     const t = tasks.find((x) => x.id === agent.task_id)
     if (t) { envId = t.environment_id; break }
   }
-  return envBoundScope(qc, projectId, envId)
+  return envBoundContext(qc, projectId, envId)
 }
 
-function resolveRoutineScope(qc: QueryClient, routineId: string): Partial<UnreadScope> {
-  // routines-all is our one-shot "all routines for this user" cache.
+function resolveRoutineContext(qc: QueryClient, routineId: string): UnreadLeafContext {
   const all = qc.getQueryData<Routine[]>(['routines-all'])
   const routine = all?.find((r) => r.id === routineId)
   if (!routine) return {}
   const envId = routine.environment_id
-  // Project id comes from walking envs for each known project.
   const env = findEnv(qc, envId)
   if (!env) return { environmentId: envId }
-  return envBoundScope(qc, env.project_id, envId, env)
+  return envBoundContext(qc, env.project_id, envId, env)
 }
 
-function resolveIssueScope(qc: QueryClient, appId: string, projectId: string): Partial<UnreadScope> {
-  // Issues are stack-level in the UI (the "Issues" pin lives alongside
-  // Overview / Tasks under each stack header), so we deliberately do NOT
-  // mark the environment dot — it would give the user a false signal that
-  // the env itself has something to look at (e.g. an agent finished),
-  // which isn't the case. We do mark the stack (for the collapsed-header
-  // rollup) and the `stackPin` for the Issues row itself.
-  const scope: Partial<UnreadScope> = { projectId }
+/**
+ * Issues are stack-level in the UI (the "Issues" pin lives under each stack
+ * header, alongside Overview / Tasks). We deliberately do NOT set
+ * `environmentId` on the context — that would light up the env row and give
+ * a false "something happened in this env" signal. Stack + project is the
+ * right granularity; the `byStackPin[issues]` leaf itself handles per-stack
+ * visibility.
+ */
+function resolveIssueContext(qc: QueryClient, appId: string, projectId: string): UnreadLeafContext {
+  const ctx: UnreadLeafContext = { projectId }
   const apps = qc.getQueryData<ReportingApp[]>(['apps', projectId])
   const app = apps?.find((a) => a.id === appId)
   const envId = app?.environment_id ?? undefined
   if (envId) {
     const env = findEnv(qc, envId)
-    if (env?.stack_id) {
-      scope.stackId = env.stack_id
-      scope.stackPin = { stackId: env.stack_id, pinKey: 'issues' }
-    }
+    if (env?.stack_id) ctx.stackId = env.stack_id
   }
-  return scope
+  return ctx
 }
 
-/** Common rollup: given projectId + optional envId, resolve stack via envs. */
-function envBoundScope(
+/** Given projectId + optional envId, resolve stack via envs and return the
+ *  full `{projectId, stackId, environmentId}` chain for leaf denorm. */
+function envBoundContext(
   qc: QueryClient,
   projectId: string | undefined,
   envId: string | undefined,
   envPreResolved?: Environment,
-  pinKey?: EnvPinKey,
-): Partial<UnreadScope> {
-  const scope: Partial<UnreadScope> = {}
-  if (projectId) scope.projectId = projectId
-  if (!envId) return scope
-  scope.environmentId = envId
+): UnreadLeafContext {
+  const ctx: UnreadLeafContext = {}
+  if (projectId) ctx.projectId = projectId
+  if (!envId) return ctx
+  ctx.environmentId = envId
   const env = envPreResolved ?? findEnv(qc, envId)
-  if (env?.stack_id) scope.stackId = env.stack_id
-  if (pinKey) scope.envPin = { environmentId: envId, pinKey }
-  return scope
+  if (env?.stack_id) ctx.stackId = env.stack_id
+  return ctx
 }
 
 function findEnv(qc: QueryClient, envId: string): Environment | undefined {
@@ -342,12 +343,30 @@ function handleIssueLive(
   ) {
     const pushEnabled = isPushEnabledForApp(qc, payload.app_id, name)
     if (pushEnabled) notifyIssue(name, payload)
-    markUnreadIfAway(
-      qc,
-      projectId,
-      name === 'issue.regression' ? 'issue.regression' : 'issue.created',
-      (qc) => (projectId ? resolveIssueScope(qc, payload.app_id, projectId) : {}),
-    )
+    // Mark the Issues pin directly — stackId lives on the context so both
+    // the stack header and the primary-sidebar project icon pick it up via
+    // their rollup scans. Clicking the Issues pin (which clears the
+    // matching byStackPin entry) cascades up to the stack and project dots
+    // automatically.
+    if (projectId) {
+      const ctx = resolveIssueContext(qc, payload.app_id, projectId)
+      const stackId = ctx.stackId
+      if (stackId) {
+        useUnreadStore.getState().markLeaf(
+          { stackPin: { stackId, pinKey: 'issues' } },
+          name === 'issue.regression' ? 'issue.regression' : 'issue.created',
+          ctx,
+        )
+      } else {
+        // No stack resolved yet (cache miss during a cold boot). Fall back
+        // to the old project-only mark so the primary-sidebar dot still
+        // fires; we lose the stack-pin dot until the next cache refresh.
+        useUnreadStore.getState().mark(
+          { projectId },
+          name === 'issue.regression' ? 'issue.regression' : 'issue.created',
+        )
+      }
+    }
   }
 }
 
@@ -422,7 +441,7 @@ function notifyAgentFinish(
   if (!agent?.project_id) return
   const appStore = useAppStore.getState()
   if (appStore.activeAgentId === agentId) return // user is on the tab already
-  const envId = resolveAgentScope(qc, agentId).environmentId
+  const envId = resolveAgentContext(qc, agentId).environmentId
   if (envId && appStore.selectedEnvironmentId === envId && !appStore.activeAgentId) return
   const label = agent.tab_name ?? 'Session'
   const title = reason === 'error' ? 'Alby · Agent crashed'
@@ -451,12 +470,23 @@ function notifyAgentFinish(
 function handleAutoFixRequested(payload: AutoFixPayload): void {
   console.log('[sync] auto-fix requested for issue', payload.issue_id, '-> task', payload.task_id)
   try {
-    // The renderer already has the agents:spawn IPC at window.electronAPI.agents.spawn;
-    // it only takes (taskId, agentType) and does the rest (builds prompt from task
-    // description + context_notes, pushes to AgentManager in main).
-    type AgentsAPI = { spawn: (taskId: string, agentType?: string) => Promise<unknown> }
+    // The renderer already has the agents:spawn IPC at window.electronAPI.agents.spawn.
+    // Passing `kind: 'auto-fix'` so the main-process system-prompt builder swaps
+    // the default "delegate commit/push to Alby's UI" rule for the AUTO-FIX MODE
+    // block — otherwise the cross-device auto-fix agent would get the same
+    // contradictory prompt the local path used to, and stop halfway asking the
+    // user to click the commit button.
+    type AgentsAPI = {
+      spawn: (
+        taskId: string,
+        agentType?: string,
+        autoInstall?: boolean,
+        initialPrompt?: string,
+        kind?: 'auto-fix',
+      ) => Promise<unknown>
+    }
     const api = (window as unknown as { electronAPI?: { agents?: AgentsAPI } }).electronAPI
-    void api?.agents?.spawn?.(payload.task_id, payload.agent_type)
+    void api?.agents?.spawn?.(payload.task_id, payload.agent_type, false, undefined, 'auto-fix')
   } catch (err) {
     console.warn('[sync] auto-fix spawn failed:', err)
   }
@@ -496,21 +526,26 @@ function handleEntityChanged(
   // currently looking at. Issues have their own dedicated events; here we
   // catch agent completions, new chat replies (synthesized by the backend
   // as agent updates during chat sessions), and routine finishes.
+  //
+  // Marking strategy: `markLeaf` stamps ONLY the leaf map (byAgent /
+  // byRoutine) with the full denormalized parent chain attached. The
+  // IconNavSidebar / Sidebar rollup selectors scan every leaf map for
+  // matching projectId / stackId / environmentId, so project + stack + env
+  // + Sessions-pin dots all light up without us stamping them explicitly.
+  // The big win: a click on the leaf row (which calls
+  // `useUnreadStore.clear({agentId})`) cascades up automatically — once
+  // the leaf is gone the parent rollups re-evaluate and go dark unless
+  // another pending leaf shares the same parent chain. No "clear if last"
+  // bookkeeping needed.
   if (payload.entity === 'agent' && payload.action === 'updated') {
     const status = (payload.payload as { status?: string } | undefined)?.status
     if (status === 'completed' || status === 'error') {
-      markUnreadIfAway(qc, projectId, 'agent.finished', (qc) => {
-        const base = resolveAgentScope(qc, payload.id)
-        // Agent events roll up to the Sessions pin inside the env AND mark
-        // the specific session (byAgent leaf) — the sidebar renders the leaf
-        // dot on the session row and gates each parent's dot on collapsed
-        // state, so you only see one dot per visible level.
-        if (base.environmentId) {
-          base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
-        }
-        base.agentId = payload.id
-        return base
-      })
+      const ctx = resolveAgentContext(qc, payload.id)
+      // Belt-and-suspenders: if the cache miss leaves us without a
+      // projectId, fall back to the channel's projectId so the project
+      // icon still lights up even when agents-all hasn't hydrated yet.
+      if (!ctx.projectId && projectId) ctx.projectId = projectId
+      useUnreadStore.getState().markLeaf({ agentId: payload.id }, 'agent.finished', ctx)
       // Native desktop ping so the user knows without hunting in the sidebar.
       notifyAgentFinish(qc, payload.id, status as 'completed' | 'error')
     }
@@ -519,29 +554,17 @@ function handleEntityChanged(
   // POSTs to /api/agents/{id}/idle when Claude / Gemini / Codex flips
   // working→idle; every other device receives it here and drops a dot in
   // the sidebar so the user knows output is waiting without having to
-  // check the active machine. The originating device also receives its
-  // own broadcast but `markUnreadIfAway` skips the env dot if the user is
-  // already looking at the env, so no false positive.
+  // check the active machine.
   if (payload.entity === 'agent' && payload.action === 'idle') {
-    markUnreadIfAway(qc, projectId, 'agent.activity', (qc) => {
-      const base = resolveAgentScope(qc, payload.id)
-      if (base.environmentId) {
-        base.envPin = { environmentId: base.environmentId, pinKey: 'sessions' }
-      }
-      base.agentId = payload.id
-      return base
-    })
+    const ctx = resolveAgentContext(qc, payload.id)
+    if (!ctx.projectId && projectId) ctx.projectId = projectId
+    useUnreadStore.getState().markLeaf({ agentId: payload.id }, 'agent.activity', ctx)
     notifyAgentFinish(qc, payload.id, 'idle')
   }
   if (payload.entity === 'routine' && payload.action === 'updated') {
-    markUnreadIfAway(qc, projectId, 'routine.finished', (qc) => {
-      const base = resolveRoutineScope(qc, payload.id)
-      if (base.environmentId) {
-        base.envPin = { environmentId: base.environmentId, pinKey: 'routines' }
-      }
-      base.routineId = payload.id
-      return base
-    })
+    const ctx = resolveRoutineContext(qc, payload.id)
+    if (!ctx.projectId && projectId) ctx.projectId = projectId
+    useUnreadStore.getState().markLeaf({ routineId: payload.id }, 'routine.finished', ctx)
   }
   if (payload.entity === 'task' && payload.action === 'updated') {
     markUnreadIfAway(qc, projectId, 'task.updated')

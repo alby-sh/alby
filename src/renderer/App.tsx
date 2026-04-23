@@ -14,6 +14,7 @@ import { useConnectionStore } from './stores/connection-store'
 import { useAuthStore } from './stores/auth-store'
 import { subscribeToProject, useSyncBootstrap } from './stores/sync-store'
 import { usePresenceSubscriptions } from './stores/presence-store'
+import { useDeviceBootstrap } from './stores/device-store'
 import { useOnlineBootstrap, useOnlineStore } from './stores/online-store'
 import { useAllProjects } from './hooks/useProjects'
 import { useAgentHeartbeats } from './hooks/useAgentHeartbeats'
@@ -106,6 +107,10 @@ export default function App() {
   // Join presence channels for the currently-viewed agent / routine so the
   // sidebar can show who else is looking at the same thing in real time.
   usePresenceSubscriptions()
+  // v0.8.3: fetch this install's device id/name once at boot and cache it
+  // in zustand. Every sidebar row reads it synchronously to decide "is
+  // this agent's PTY mine or on another Mac?".
+  useDeviceBootstrap()
   // Track online/offline state for the offline-mode banner.
   useOnlineBootstrap()
   // Send working/viewed time deltas to the cloud every 30 s for reporting.

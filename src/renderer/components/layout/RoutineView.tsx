@@ -155,6 +155,30 @@ export function RoutineView({ routineId }: Props) {
 
   const isRunning = !!routine?.tmux_session_name
   const isLoop = (routine?.interval_seconds ?? 0) > 0
+  // Manual = neither cron nor interval. Only manual routines get the per-run
+  // textarea, because cron/interval ones fire unattended and there'd be no
+  // human there to type anything. This mirrors the backend guard in
+  // RoutineManager.start().
+  const isManual = !!routine && !routine.cron_expression && (routine.interval_seconds ?? 0) <= 0
+
+  // One-off instructions the user types into the "before Start" textarea.
+  // Cleared every time the routine transitions from stopped → running so the
+  // next manual run starts from a blank slate instead of silently re-using
+  // the previous addendum.
+  const [extraInput, setExtraInput] = useState('')
+  useEffect(() => {
+    if (isRunning) setExtraInput('')
+  }, [isRunning])
+
+  const handleStart = useCallback(() => {
+    if (!canStart || !routine) return
+    if (isManual) {
+      const trimmed = extraInput.trim()
+      startRoutine.mutate(trimmed ? { id: routine.id, extraInput: trimmed } : routine.id)
+    } else {
+      startRoutine.mutate(routine.id)
+    }
+  }, [canStart, routine, isManual, extraInput, startRoutine])
 
   // Derive what the status pill should say. The hierarchy is:
   //   attention > waiting-for-activity-signal > working > idle > default.
@@ -224,7 +248,7 @@ export function RoutineView({ routineId }: Props) {
             </button>
           ) : (
             <button
-              onClick={() => canStart && startRoutine.mutate(routineId)}
+              onClick={handleStart}
               disabled={startRoutine.isPending || !canStart}
               title={canStart
                 ? undefined
@@ -318,6 +342,71 @@ export function RoutineView({ routineId }: Props) {
           <ErrorBoundary>
             <TerminalPanel agentId={routineId} registerWriter={registerWriter} kind="routine" />
           </ErrorBoundary>
+        ) : isManual ? (
+          // Manual / one-time routines: give the user a per-run textarea so
+          // they can tack an extra instruction onto the stored prompt before
+          // firing the CLI. Empty is fine — we just run the base prompt.
+          // Scheduled routines fall through to the neutral placeholder below
+          // because there's no interactive launcher to attach inputs to.
+          <div className="absolute inset-0 flex items-start justify-center overflow-auto">
+            <div className="w-full max-w-2xl px-6 py-10 flex flex-col gap-4">
+              <div className="text-center">
+                <p className="text-sm text-[var(--text-primary)] mb-1">Routine is stopped</p>
+                <p className="text-xs text-[var(--text-secondary)] opacity-70">
+                  Add any extra context for this run, then press Start. Leave it empty to run the
+                  stored prompt as-is.
+                </p>
+                {routine.last_exit_code != null && (
+                  <p className="text-xs text-amber-400 mt-2">Last exit code: {routine.last_exit_code}</p>
+                )}
+              </div>
+
+              <div className="rounded-lg border border-[var(--border-color)] bg-[var(--bg-secondary)]/40 p-3 text-[11px] text-[var(--text-secondary)]">
+                <div className="font-medium text-[var(--text-primary)] mb-1">Stored prompt</div>
+                <div className="font-mono whitespace-pre-wrap break-words max-h-32 overflow-auto opacity-80">
+                  {routine.prompt || <span className="italic opacity-60">(empty)</span>}
+                </div>
+              </div>
+
+              <label className="flex flex-col gap-1.5">
+                <span className="text-xs font-medium text-[var(--text-primary)]">
+                  Additional instructions for this run <span className="opacity-60 font-normal">(optional)</span>
+                </span>
+                <textarea
+                  value={extraInput}
+                  onChange={(e) => setExtraInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Cmd/Ctrl+Enter to launch without reaching for the mouse —
+                    // consistent with the agent input throughout the app.
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                      e.preventDefault()
+                      handleStart()
+                    }
+                  }}
+                  placeholder="e.g. Focus on the auth flow today. Ignore the legacy `/v1` endpoints."
+                  rows={5}
+                  disabled={startRoutine.isPending || !canStart}
+                  className="w-full resize-y rounded-md border border-[var(--border-color)] bg-[var(--bg-primary)] px-3 py-2 text-[12px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-secondary)]/50 focus:outline-none focus:border-[var(--accent)] disabled:opacity-50"
+                />
+              </label>
+
+              <div className="flex items-center justify-end gap-2">
+                <span className="text-[11px] text-[var(--text-secondary)] opacity-60 mr-auto">
+                  ⌘/Ctrl + Enter to launch
+                </span>
+                <button
+                  onClick={handleStart}
+                  disabled={startRoutine.isPending || !canStart}
+                  title={canStart
+                    ? undefined
+                    : "Your workspace role doesn't grant manage_routines and you're not on this routine's delegation allow-list."}
+                  className="px-4 py-1.5 text-xs rounded bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {startRoutine.isPending ? 'Starting…' : 'Start routine'}
+                </button>
+              </div>
+            </div>
+          </div>
         ) : (
           <div className="absolute inset-0 flex items-center justify-center text-[var(--text-secondary)]">
             <div className="text-center">

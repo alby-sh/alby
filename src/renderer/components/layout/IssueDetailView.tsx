@@ -119,9 +119,17 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
     setAnalysisError(null)
     setAnalysisSaved(false)
     try {
+      // Pass the resolved target env so the main process can route the
+       // `claude` invocation through SSH on remote envs (which is where the
+       // user's CLI is actually installed) instead of trying to exec it from
+       // the packaged Electron's barebones launchd PATH.
       const updated = (await (window.electronAPI.issues as unknown as {
-        generateAnalysis: (id: string, extra?: string) => Promise<Issue>
-      }).generateAnalysis(issue.id, extraInstruction || undefined)) as Issue
+        generateAnalysis: (id: string, extra?: string, envId?: string) => Promise<Issue>
+      }).generateAnalysis(
+        issue.id,
+        extraInstruction || undefined,
+        fixTarget?.targetEnv?.id
+      )) as Issue
       setAnalysisDraft(updated.analysis ?? '')
       setAnalysisDirty(false)
       setRefinementTurn('')
@@ -205,7 +213,14 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
         general!.id,
         stack?.auto_fix_agent_type ?? 'claude',
         false,
-        prompt
+        prompt,
+        // The `'auto-fix'` kind tells the main-process system-prompt builder
+        // to swap the default "delegate commit/push to Alby's UI" rule for
+        // an explicit "you ARE authorised to commit, push and curl the
+        // signed resolve URL yourself" block — otherwise the agent writes
+        // the fix but then stops and tells the user to commit manually,
+        // which defeats the whole point of this button.
+        'auto-fix',
       )) as { id: string }
       selectTask(general!.id, targetEnv.id)
       setActiveAgent(agent.id)
@@ -814,16 +829,22 @@ function buildFixPrompt(
 
   // Build a shell-friendly multi-line string. The agent's shell quoting
   // layer handles newlines via the ALBY_INITIAL_PROMPT env var path.
+  //
+  // Note: the system prompt's AUTO-FIX MODE block already authorises the
+  // agent to commit/push directly. This resolve block just hands it the
+  // signed URL — it's a plain HTTP POST, no auth header needed (the
+  // signature is in the query string and expires in 7 days).
   const resolveBlock = resolveUrl
     ? [
         '',
-        'When you have pushed a fix that you are confident resolves the issue, mark it resolved by running:',
+        'AUTO-RESOLVE STEP (required, do not skip):',
+        'After `git push` returns 0, run EXACTLY this command — it marks the issue resolved in Alby so the badge clears without the user having to click anything:',
         '',
         '```bash',
         `curl -fsS -X POST '${resolveUrl}' && echo '[alby] issue ${issue.id} marked resolved'`,
         '```',
         '',
-        'The URL is signed and expires in 7 days. If the curl fails, the user can still mark it resolved manually from Alby — don\'t block your commit on it.',
+        'The URL is signed and expires in 7 days. If the curl returns non-zero (e.g. 410 Gone, expired signature), just tell the user at the end — don\'t retry with modified URLs.',
       ].join('\n')
     : ''
 
@@ -847,8 +868,8 @@ function buildFixPrompt(
     : `A new error was reported from the "${stackName}" stack (source env: ${sourceEnvName}).`
 
   const job = isFeature
-    ? `Your job: implement the feature end-to-end following the curated analysis above (or, if missing, the title + description). Write the code, run any relevant type-check / test / lint the repo uses, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT ship half-implemented scaffolding or placeholder UI. If the scope is unclear, explain what specifically you'd need decided and stop without committing.`
-    : `Your job: investigate the root cause, apply a minimal correct fix, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT commit placeholder or debug-only changes. If you cannot safely determine a fix without more info, explain exactly what you'd need and stop without committing.`
+    ? `Your job: implement the feature end-to-end following the curated analysis above (or, if missing, the title + description). Write the code, run any relevant type-check / test / lint the repo uses, then YOU run \`git add <files>\`, \`git commit -m "<msg>"\` (include a line "alby-issue ${issue.id}" in the commit body) and \`git push\` yourself — this is the one mode where direct git from the pty is the intended path (the system prompt's AUTO-FIX MODE block confirms it). Do NOT tell the user to press an Alby commit button; that's the default rule and it's suspended here. Do NOT ship half-implemented scaffolding or placeholder UI. If the scope is unclear, explain what specifically you'd need decided and stop without committing.`
+    : `Your job: investigate the root cause, apply a minimal correct fix, then YOU run \`git add <files>\`, \`git commit -m "<msg>"\` (include a line "alby-issue ${issue.id}" in the commit body) and \`git push\` yourself — this is the one mode where direct git from the pty is the intended path (the system prompt's AUTO-FIX MODE block confirms it). Do NOT tell the user to press an Alby commit button; that's the default rule and it's suspended here. Do NOT commit placeholder or debug-only changes. If you cannot safely determine a fix without more info, explain exactly what you'd need and stop without committing.`
 
   const lines = [
     opening,

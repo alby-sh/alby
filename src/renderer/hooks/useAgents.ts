@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useCallback } from 'react'
 import type { Agent, AgentStatus } from '../../shared/types'
+import { useToastStore } from '../stores/toast-store'
 
 const api = () => window.electronAPI
 
@@ -16,8 +17,23 @@ export function useAllAgents() {
   return useQuery<Agent[]>({
     queryKey: ['agents-all'],
     queryFn: () => api().agents.listAll(),
-    refetchInterval: 15000,
-    staleTime: 8000
+    // v0.8.3: tightened the safety-net poll from 15 s → 5 s. Reverb is the
+    // primary path (`entity.changed` with entity=agent invalidates this
+    // key instantly), but the poll catches the edge cases:
+    //   (a) Reverb disconnected (flaky wifi, laptop sleep) — the app still
+    //       needs to discover a teammate's new session in a few seconds,
+    //       not wait half a minute.
+    //   (b) A local agent spawned on another Mac: the server broadcasts it,
+    //       but if the socket is stale the only way to see the row is the
+    //       poll-driven `listAllRunningAgents` call below.
+    // 5 s × N clients is still cheap: the endpoint is a single indexed
+    // query, returns at most a few dozen rows per user. Combined with
+    // `refetchOnWindowFocus` below the live-feel is effectively instant
+    // when you switch to the app tab.
+    refetchInterval: 5000,
+    staleTime: 3000,
+    refetchOnWindowFocus: true,
+    refetchOnReconnect: true,
   })
 }
 
@@ -52,23 +68,34 @@ export function useUpdateAgent() {
 
 export function useKillAgent() {
   const qc = useQueryClient()
+  const pushToast = useToastStore((s) => s.push)
   return useMutation({
     mutationFn: (agentId: string) => api().agents.kill(agentId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agents'] })
       qc.invalidateQueries({ queryKey: ['agents-all'] })
-    }
+    },
+    // v0.8.3: the main-process guard throws a friendly string when the
+    // user tries to kill a foreign-local agent. Surface it as a toast so
+    // the click has visible feedback instead of silently failing.
+    onError: (err: unknown) => {
+      pushToast({ message: err instanceof Error ? err.message : String(err) })
+    },
   })
 }
 
 export function useDeleteAgent() {
   const qc = useQueryClient()
+  const pushToast = useToastStore((s) => s.push)
   return useMutation({
     mutationFn: (agentId: string) => api().agents.delete(agentId),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['agents'] })
       qc.invalidateQueries({ queryKey: ['agents-all'] })
-    }
+    },
+    onError: (err: unknown) => {
+      pushToast({ message: err instanceof Error ? err.message : String(err) })
+    },
   })
 }
 

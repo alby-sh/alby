@@ -1,7 +1,7 @@
 {
   "name": "alby",
   "productName": "Alby",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "The desktop control room for AI coding agents — run Claude Code, Gemini and Codex across every server you own.",
   "author": {
     "name": "Alberto Pisaroni",

@@ -24,6 +24,8 @@ import { AddStackView } from './AddStackView'
 import { StackTabsView } from './StackTabsView'
 import { EnvTabsView } from './EnvTabsView'
 import { useWorkspaceRole } from '../../hooks/useWorkspaceRole'
+import { useDeviceStore, isForeignLocalAgent } from '../../stores/device-store'
+import { ForeignLocalSessionPanel } from '../terminal/ForeignLocalSessionPanel'
 import type { AgentSettings } from '../../../shared/types'
 import { DEFAULT_AGENT_SETTINGS } from '../../../shared/types'
 
@@ -155,6 +157,11 @@ export function MainArea() {
 
   const { data: agents } = useAgents(selectedTaskId)
   const { data: allAgents } = useAllAgents()
+  // v0.8.3: cached once at boot by useDeviceBootstrap in App.tsx. We pass it
+  // into isForeignLocalAgent in the agent-render loop to decide whether a
+  // given tab should show the normal TerminalPanel/ChatPanel or the
+  // read-only "running on another Mac" placeholder.
+  const ourDeviceId = useDeviceStore((s) => s.id)
   const { data: environment } = useEnvironment(selectedEnvironmentId)
 
   // Launch agents (spawned by the sidebar Play/Stop toggle on the env
@@ -928,6 +935,12 @@ export function MainArea() {
           const style: React.CSSProperties = isVisible
             ? { left: `${paneLayouts[paneIdx]?.left ?? 0}%`, width: `${paneLayouts[paneIdx]?.width ?? 100}%`, zIndex: 2 }
             : { left: 0, width: '100%', zIndex: -1, pointerEvents: 'none' }
+          // v0.8.3: foreign-local → show the "running on another Mac"
+          // placeholder instead of TerminalPanel / ChatPanel. The IPC guards
+          // would reject any stdin/resize coming from the terminal panels
+          // anyway, but swapping the component at this level avoids the
+          // flash of an empty xterm that waits forever for output.
+          const foreign = isForeignLocalAgent(agent, ourDeviceId)
 
           return (
             <div
@@ -937,7 +950,9 @@ export function MainArea() {
               onClick={isVisible ? () => { setActivePaneIndex(paneIdx); setActiveAgent(agent.id) } : undefined}
             >
               <ErrorBoundary>
-                {agent.tab_name?.toLowerCase().startsWith('chat') ? (
+                {foreign ? (
+                  <ForeignLocalSessionPanel agent={agent} />
+                ) : agent.tab_name?.toLowerCase().startsWith('chat') ? (
                   <ChatPanel agentId={agent.id} visible={isVisible} />
                 ) : (
                   <TerminalPanel agentId={agent.id} registerWriter={registerWriter} visible={isVisible} />

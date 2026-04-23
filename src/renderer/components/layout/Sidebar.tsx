@@ -42,6 +42,7 @@ import {
 import { useActivityStore } from '../../stores/activity-store'
 import { useConnectionStore } from '../../stores/connection-store'
 import { usePresenceFor } from '../../stores/presence-store'
+import { useDeviceStore, isForeignLocalAgent } from '../../stores/device-store'
 import { AvatarStack } from '../ui/AvatarStack'
 import { useUnreadStore, type EnvPinKey, type StackPinKey } from '../../stores/unread-store'
 import { NewProjectDialog } from '../dialogs/NewProjectDialog'
@@ -265,6 +266,14 @@ function SessionRow({
   const setActiveAgent = useAppStore((s) => s.setActiveAgent)
   const [dragOver, setDragOver] = useState<'above' | 'below' | null>(null)
   const viewers = usePresenceFor('agent', agent.id)
+  // v0.8.3: is this agent's PTY on another Mac? When true:
+  //   - render an owner-avatar chip instead of normal styling
+  //   - still allow click (the MainArea shows a "running elsewhere" placeholder)
+  //   - the drag-to-reorder still works locally; the server broadcasts the
+  //     reorder but the owner device is free to reorder in its own view too
+  //     (last write wins; acceptable because sort_order is per-user UX).
+  const ourDeviceId = useDeviceStore((s) => s.id)
+  const isForeign = isForeignLocalAgent(agent, ourDeviceId)
   // tab_name is stored as a display string like "Claude" or "Terminal"; we
   // normalise to a lowercase kind to pick a colour and a short label.
   const kind = (agent.tab_name?.split(' ')[0] || 'terminal').toLowerCase()
@@ -346,12 +355,31 @@ function SessionRow({
         className="ml-2 shrink-0 w-1 h-3 rounded-full"
         style={{ backgroundColor: color }}
       />
-      <span className="ml-2 text-[12px] text-neutral-100 truncate flex-1">{title}</span>
+      <span
+        className={`ml-2 text-[12px] truncate flex-1 ${isForeign ? 'text-neutral-400 italic' : 'text-neutral-100'}`}
+      >
+        {title}
+      </span>
       <span className="ml-2 shrink-0 flex items-center">
         <AgentUnreadDot agentId={agent.id} />
       </span>
-      {viewers.length > 0 && (
-        <span className="ml-2"><AvatarStack users={viewers} /></span>
+      {/* Foreign-local chip: "🔒 alby-mbp.local" — shown instead of the
+       *  normal elapsed time so the row is unambiguously "read-only from
+       *  here". Tooltip spells out exactly why the terminal is locked.
+       *  Interaction (MainArea placeholder) is triggered on click, not on
+       *  hover, so the chip stays a pure status signal. */}
+      {isForeign ? (
+        <span
+          className="ml-2 shrink-0 inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded bg-neutral-800/80 text-neutral-300 border border-neutral-700"
+          title={`Running on ${agent.device_name || 'another device'} — open Alby there to interact. Read-only from this Mac.`}
+        >
+          <span aria-hidden>🔒</span>
+          <span className="truncate max-w-[120px]">{agent.device_name || 'other device'}</span>
+        </span>
+      ) : (
+        viewers.length > 0 && (
+          <span className="ml-2"><AvatarStack users={viewers} /></span>
+        )
       )}
       <span className="ml-2 text-[10px] text-neutral-500 tabular-nums shrink-0">
         {formatAgo(agent.started_at || agent.created_at)}
@@ -1100,6 +1128,7 @@ function SessionsSubTree({
     [allIds, handleReorder],
   )
 
+  const ourDeviceId = useDeviceStore((s) => s.id)
   const handleContextMenu = useCallback(
     (e: React.MouseEvent, agent: Agent, index: number, total: number) => {
       e.preventDefault()
@@ -1107,18 +1136,25 @@ function SessionsSubTree({
       const items: ContextMenuState['items'] = []
       if (index > 0) items.push({ label: 'Move up', onClick: () => moveBy(index, -1) })
       if (index < total - 1) items.push({ label: 'Move down', onClick: () => moveBy(index, 1) })
+      // v0.8.3: on a foreign-local agent, kill/delete must be performed on
+      // the OWNER Mac (the main-process IPC guard refuses them anyway; this
+      // just keeps the menu honest). We still allow Move up/down — that's
+      // local UX, and sort_order for foreign locals is harmless.
+      const isForeign = isForeignLocalAgent(agent, ourDeviceId)
       const isRunning = agent.status === 'running'
-      items.push({
-        label: isRunning ? 'Kill & delete' : 'Delete',
-        onClick: () => {
-          if (isRunning) killAgent.mutate(agent.id)
-          deleteAgent.mutate(agent.id)
-          if (activeAgentId === agent.id) setActiveAgent(null)
-        },
-      })
+      if (!isForeign) {
+        items.push({
+          label: isRunning ? 'Kill & delete' : 'Delete',
+          onClick: () => {
+            if (isRunning) killAgent.mutate(agent.id)
+            deleteAgent.mutate(agent.id)
+            if (activeAgentId === agent.id) setActiveAgent(null)
+          },
+        })
+      }
       setContextMenu({ x: e.clientX, y: e.clientY, items })
     },
-    [moveBy, killAgent, deleteAgent, activeAgentId, setActiveAgent, setContextMenu],
+    [moveBy, killAgent, deleteAgent, activeAgentId, setActiveAgent, setContextMenu, ourDeviceId],
   )
   if (sorted.length === 0) {
     const launchTerminal = async (): Promise<void> => {
@@ -1588,6 +1624,8 @@ function EnvironmentGroup({
   const activeAgentId = useAppStore((s) => s.activeAgentId)
   const selectedEnvironmentId = useAppStore((s) => s.selectedEnvironmentId)
   const selectEnvironment = useAppStore((s) => s.selectEnvironment)
+  // Live presence on the env row — via `presence-environment.<id>`.
+  const envViewers = usePresenceFor('environment', envId)
   const envExpandedOverride = useAppStore((s) => s.envExpandedOverride)
   const toggleEnvironmentExpanded = useAppStore((s) => s.toggleEnvironmentExpanded)
   const { status: gitStatus, refresh: refreshGit } = useGitStatus(envId)
@@ -1704,6 +1742,16 @@ function EnvironmentGroup({
         <ConnectionDot envId={envId} />
         <EnvUnreadDot envId={envId} hideWhenExpanded={isExpanded} />
         {!isExpanded && <AgentBadge agents={visibleAgents} />}
+        {envViewers.length > 0 && (
+          <span className="ml-2 shrink-0">
+            <AvatarStack
+              users={envViewers}
+              max={3}
+              size="xs"
+              title={`In this env: ${envViewers.map((v) => v.name).join(', ')}`}
+            />
+          </span>
+        )}
       </div>
       {/* Git status icons sit just LEFT of the role badge, with their own
        *  horizontal breathing room. The badge itself is the rightmost element,
@@ -1863,6 +1911,11 @@ function StackGroup({
 
   const openIssues = useStackOpenIssueCount(projectId, stack.id)
   const openTasks = useStackOpenTaskCount(stack.id)
+  // Live presence on the stack row — shows teammates (and the local user's
+  // other devices) looking at this codebase right now via the
+  // `presence-stack.<id>` Reverb channel. Filtered to non-empty; the
+  // AvatarStack component self-hides when `users` is empty.
+  const stackViewers = usePresenceFor('stack', stack.id)
 
   const [stackDropPos, setStackDropPos] = useState<'above' | 'below' | null>(null)
 
@@ -1972,6 +2025,16 @@ function StackGroup({
               title={`${openTasks} open task${openTasks === 1 ? '' : 's'}`}
             >
               {openTasks > 99 ? '99+' : openTasks}
+            </span>
+          )}
+          {stackViewers.length > 0 && (
+            <span className="ml-1 shrink-0">
+              <AvatarStack
+                users={stackViewers}
+                max={3}
+                size="xs"
+                title={`In this stack: ${stackViewers.map((v) => v.name).join(', ')}`}
+              />
             </span>
           )}
         </button>

@@ -11,6 +11,7 @@ import { PortForwarder } from '../ssh/port-forwarder'
 import { detectPortsInChunk } from '../ssh/port-detector'
 import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
+import { getDeviceInfo } from '../device/device-id'
 import { isLaunchTabName } from '../../shared/launch-agent'
 import type { Agent, Task, Environment, Project, ForwardedPort } from '../../shared/types'
 
@@ -407,7 +408,14 @@ export class AgentManager {
     }
   }
 
-  async spawn(taskId: string, win: BrowserWindow, agentType: string = 'claude', autoInstall: boolean = false, initialPrompt?: string): Promise<Agent> {
+  async spawn(
+    taskId: string,
+    win: BrowserWindow,
+    agentType: string = 'claude',
+    autoInstall: boolean = false,
+    initialPrompt?: string,
+    kind?: 'auto-fix',
+  ): Promise<Agent> {
     let taskData = this.projectsRepo.getTaskWithEnvironment(taskId)
     if (!taskData) {
       // Cache miss — fresh installs or newly-created-cross-device tasks may not
@@ -441,12 +449,22 @@ export class AgentManager {
     const tabNum = this.agentsRepo.countByTask(taskId) + 1
     const pretty = agentType.charAt(0).toUpperCase() + agentType.slice(1)
     const tabName = tabNum <= 1 ? pretty : `${pretty} ${tabNum}`
+    // v0.8.3: stamp device ownership on every new agent row. On remote envs
+    // the PTY actually lives on the SSH host and can be re-attached from
+    // any device, but we still record the Mac that kicked it off so the
+    // sidebar can attribute the spawn to a teammate avatar. On local envs
+    // this is the only field that tells other clients "this PTY is pinned
+    // to that Mac, don't try to attach it here".
+    const deviceInfo = getDeviceInfo()
     const agent = this.agentsRepo.create({
       task_id: taskId,
       tab_name: tabName,
       status: 'running',
       prompt: '',
-      started_at: new Date().toISOString()
+      started_at: new Date().toISOString(),
+      device_id: deviceInfo.device_id,
+      device_name: deviceInfo.device_name,
+      execution_mode: env.execution_mode === 'remote' ? 'remote' : 'local',
     })
 
     // Chat: headless claude via stream-json. No pty, no tmux — structured
@@ -488,7 +506,7 @@ export class AgentManager {
       localCmd = 'bash -l'
     } else {
       // AI agent (claude, gemini, codex, etc.)
-      const systemPrompt = this.buildSystemPrompt(taskData, agent.id)
+      const systemPrompt = this.buildSystemPrompt(taskData, agent.id, kind)
       const agentConfig = env.agent_settings?.[agentType as keyof typeof env.agent_settings] ?? { enabled: true, skip_permissions: true, use_chrome: true }
       // Remote path: the legacy shell-quoted form. Works over SSH because the
       // prompt goes through an extra layer of bash-escaping inside remoteCmd.
@@ -855,7 +873,8 @@ export class AgentManager {
       environment: Environment
       project: Project
     },
-    agentId: string
+    agentId: string,
+    kind?: 'auto-fix',
   ): string {
     // The protected "general" task is an ad-hoc launch target — agents on it
     // start clean, with no project/task context injected.
@@ -948,35 +967,73 @@ export class AgentManager {
       currentDeployBlock
     )
 
-    // Tell the agent to delegate git operations and deploys to Alby's UI so
-    // they're attributed to the human in the project Activity Report. Raw
-    // CLI git from inside the pty bypasses the audit hook and is invisible
-    // to reviewers.
-    sections.push(
-      `[USE ALBY'S BUILT-IN GIT & DEPLOY ACTIONS]\n` +
-      `Alby tracks every commit / push / pull / fetch / discard that goes ` +
-      `through its UI in the project Activity Report (cyan "git ..." badges, ` +
-      `attributed to the user who clicked the button). When you run ` +
-      `\`git push\`, \`git commit\`, etc. from this terminal those operations ` +
-      `do NOT show up in the report — they just happen on the remote box and ` +
-      `nobody on the team sees them.\n\n` +
-      `Default workflow:\n` +
-      `  1. Make your code changes here. Do NOT run \`git add\` / \`git commit\` ` +
-      `     / \`git push\` / \`git pull\` / \`git fetch\` directly.\n` +
-      `  2. When the change is ready, tell the user: "I've finished the edits ` +
-      `     — please use Alby's commit button (top of the right sidebar) to ` +
-      `     review the diff and push." Suggest a clear, conventional commit ` +
-      `     message they can paste in.\n` +
-      `  3. To pull / fetch / discard, ask them to use the same right-sidebar ` +
-      `     buttons. Reason: those actions need to land in the Activity Report ` +
-      `     for review, billing and team auditing.\n` +
-      `  4. To deploy to a deploy-role environment, tell them to switch to ` +
-      `     that env's tab and press the green "Run deploy" button — the ` +
-      `     pre-commands → git pull → post-commands pipeline is logged end-to-end.\n\n` +
-      `Read-only git commands (\`git status\`, \`git diff\`, \`git log\`, ` +
-      `\`git branch\`, \`git show\`, \`git blame\`) are fine to run yourself — ` +
-      `they don't change repository state.`
-    )
+    if (kind === 'auto-fix') {
+      // Auto-fix agents are spawned from the Issue detail view's "Fix with
+      // agent" button. The user has explicitly opted in to a hands-off flow:
+      // we WANT the agent to commit, push and mark the issue resolved on its
+      // own — stopping to ask "please click the commit button" defeats the
+      // whole point of the feature. Trade-off: the auto-fix commit won't
+      // carry an Activity-Report "git.commit_push" badge, since it bypasses
+      // Alby's IPC. Accepted because (a) the commit message includes the
+      // `alby-issue <id>` trailer, so it's still traceable, and (b) the
+      // subsequent resolve POST is logged server-side with the issue id.
+      sections.push(
+        `[AUTO-FIX MODE — YOU ARE AUTHORISED TO COMMIT, PUSH AND RESOLVE]\n` +
+        `This agent was launched from Alby's "Fix with agent" button on an ` +
+        `issue. The user wants a fully automated round-trip: edit code, ` +
+        `commit, push, and mark the issue resolved — no human hand-off.\n\n` +
+        `Workflow for this session ONLY:\n` +
+        `  1. Investigate and apply a minimal, correct fix.\n` +
+        `  2. Run the repo's type-check / lint / test commands if they're ` +
+        `     fast (< 60 s). Skip heavy e2e suites.\n` +
+        `  3. Stage and commit yourself with \`git add <files>\` and ` +
+        `     \`git commit -m '<msg>'\`. Include the trailer ` +
+        `     \`alby-issue <issue-id>\` in the commit body for traceability.\n` +
+        `  4. Push with \`git push\` (or \`git push -u origin <branch>\` if ` +
+        `     the branch is new).\n` +
+        `  5. Once the push succeeds, run the signed curl command provided ` +
+        `     in the task prompt to mark the issue resolved in Alby.\n\n` +
+        `Constraints (still apply):\n` +
+        `  - Do NOT \`git push --force\` unless explicitly asked.\n` +
+        `  - Do NOT act on sibling environments — work only on this one.\n` +
+        `  - Do NOT trigger a deploy. The user runs deploys from Alby's UI.\n` +
+        `  - If you cannot determine a safe fix, stop WITHOUT committing and ` +
+        `    explain exactly what decision you need.\n\n` +
+        `The "delegate git to Alby's UI" rule that applies to normal agents ` +
+        `is suspended here: this is the one mode where direct git from the ` +
+        `pty is the intended path.`
+      )
+    } else {
+      // Tell the agent to delegate git operations and deploys to Alby's UI so
+      // they're attributed to the human in the project Activity Report. Raw
+      // CLI git from inside the pty bypasses the audit hook and is invisible
+      // to reviewers.
+      sections.push(
+        `[USE ALBY'S BUILT-IN GIT & DEPLOY ACTIONS]\n` +
+        `Alby tracks every commit / push / pull / fetch / discard that goes ` +
+        `through its UI in the project Activity Report (cyan "git ..." badges, ` +
+        `attributed to the user who clicked the button). When you run ` +
+        `\`git push\`, \`git commit\`, etc. from this terminal those operations ` +
+        `do NOT show up in the report — they just happen on the remote box and ` +
+        `nobody on the team sees them.\n\n` +
+        `Default workflow:\n` +
+        `  1. Make your code changes here. Do NOT run \`git add\` / \`git commit\` ` +
+        `     / \`git push\` / \`git pull\` / \`git fetch\` directly.\n` +
+        `  2. When the change is ready, tell the user: "I've finished the edits ` +
+        `     — please use Alby's commit button (top of the right sidebar) to ` +
+        `     review the diff and push." Suggest a clear, conventional commit ` +
+        `     message they can paste in.\n` +
+        `  3. To pull / fetch / discard, ask them to use the same right-sidebar ` +
+        `     buttons. Reason: those actions need to land in the Activity Report ` +
+        `     for review, billing and team auditing.\n` +
+        `  4. To deploy to a deploy-role environment, tell them to switch to ` +
+        `     that env's tab and press the green "Run deploy" button — the ` +
+        `     pre-commands → git pull → post-commands pipeline is logged end-to-end.\n\n` +
+        `Read-only git commands (\`git status\`, \`git diff\`, \`git log\`, ` +
+        `\`git branch\`, \`git show\`, \`git blame\`) are fine to run yourself — ` +
+        `they don't change repository state.`
+      )
+    }
 
     const otherAgents = this.agentsRepo.list(task.id).filter((a) => a.id !== agentId)
     if (otherAgents.length > 0) {

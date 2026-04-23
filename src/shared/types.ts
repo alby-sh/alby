@@ -201,6 +201,30 @@ export interface Agent {
   sort_order: number
   // Populated only by agents.listAll() via JOIN; undefined from per-task queries.
   project_id?: string
+  /**
+   * Device-ownership fields — populated for every agent row so teammates on
+   * other Macs can see the agent in their sidebar even when its env is
+   * `execution_mode: 'local'` (in which case the PTY only lives on the
+   * originating Mac and other clients must render it as read-only).
+   *
+   *   device_id    — stable UUID persisted in this installation's userData;
+   *                  survives updates, reset on a fresh install.
+   *   device_name  — human-readable label (OS hostname) for the UI banner
+   *                  "Running on Alberto's MacBook Pro" on foreign locals.
+   *   execution_mode — denormalised from the environment so the sidebar can
+   *                  pick "foreign local" without JOINing on envs at render
+   *                  time. 'local' agents are only interactive on their
+   *                  owner device; 'remote' agents are fair game for any
+   *                  device that can reach the SSH host.
+   *
+   * All three are optional: legacy rows created before this feature shipped
+   * have no device metadata, and we treat such rows as "owner unknown —
+   * behave like today's local-only flow for spawning, remote-attachable for
+   * remote envs" (matches the pre-0.8.3 behaviour, no regression).
+   */
+  device_id?: string | null
+  device_name?: string | null
+  execution_mode?: 'local' | 'remote' | null
 }
 
 export interface SSHHost {

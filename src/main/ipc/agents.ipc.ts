@@ -5,6 +5,7 @@ import { ProjectsRepo } from '../db/projects.repo'
 import { AgentManager } from '../agents/agent-manager'
 import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
+import { getDeviceInfo, getDeviceId } from '../device/device-id'
 
 /**
  * Agent IPC handlers.
@@ -22,6 +23,40 @@ import { loadToken } from '../auth/keychain'
 export function registerAgentsIPC(db: Database.Database, agentManager: AgentManager): void {
   const repo = new AgentsRepo(db)
   const projectsRepo = new ProjectsRepo(db)
+
+  // v0.8.3: every renderer needs to know its own device id so it can decide
+  // "this foreign-local agent belongs to someone else, show the read-only
+  // placeholder instead of the terminal". Renderer caches this at boot in
+  // auth-store so it's available synchronously during every sidebar render.
+  ipcMain.handle('device:info', () => getDeviceInfo())
+
+  /**
+   * v0.8.3: guard rail for any IPC that would mutate / interact with an
+   * agent's runtime (kill, delete, write-stdin, resize, ensure-attached,
+   * chat-send/restart/delete). A `local` agent's PTY only exists on the
+   * originating Mac — if a DIFFERENT Mac tries to kill/write it, we have
+   * to refuse, otherwise the cloud row flips to "completed" but the PTY
+   * keeps running on the owner box, leaving everything out of sync.
+   *
+   * Legacy agents without `device_id` (rows created before 0.8.3) pass
+   * through unguarded so the upgrade doesn't brick in-flight sessions.
+   * Remote-env agents also pass through — their PTY lives in an SSH+tmux
+   * session that any authorised device can reach, so cross-device kill
+   * is a legitimate operation there.
+   *
+   * Returns a friendly error message on refusal; callers throw the
+   * string as an Error so the renderer can toast it.
+   */
+  const refuseIfForeignLocal = (agentId: string): string | null => {
+    const row = repo.get(agentId)
+    if (!row) return null
+    if (row.execution_mode !== 'local') return null
+    if (!row.device_id) return null // legacy, unguarded
+    const mine = getDeviceId()
+    if (row.device_id === mine) return null
+    const owner = row.device_name || 'another device'
+    return `This session is running locally on "${owner}". Open Alby on that Mac to interact with it — remote control isn't available for local PTYs.`
+  }
 
   // Helper to mirror writes to the cloud — awaited so the next list refetch
   // sees consistent state. Previously these were fire-and-forget which raced
@@ -108,31 +143,43 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
     }
   })
 
-  ipcMain.handle('agents:spawn', async (event, taskId: string, agentType?: string, autoInstall?: boolean, initialPrompt?: string) => {
-    console.log('[agents:spawn] taskId:', taskId, 'agentType:', agentType || 'claude', 'autoInstall:', !!autoInstall, 'initialPrompt:', initialPrompt ? `${initialPrompt.slice(0, 60)}…` : 'none')
+  ipcMain.handle('agents:spawn', async (event, taskId: string, agentType?: string, autoInstall?: boolean, initialPrompt?: string, kind?: 'auto-fix') => {
+    console.log('[agents:spawn] taskId:', taskId, 'agentType:', agentType || 'claude', 'autoInstall:', !!autoInstall, 'kind:', kind || 'default', 'initialPrompt:', initialPrompt ? `${initialPrompt.slice(0, 60)}…` : 'none')
     try {
       const win = BrowserWindow.fromWebContents(event.sender)
       if (!win) throw new Error('No window found')
-      const agent = await agentManager.spawn(taskId, win, agentType || 'claude', !!autoInstall, initialPrompt)
+      const agent = await agentManager.spawn(taskId, win, agentType || 'claude', !!autoInstall, initialPrompt, kind)
       console.log('[agents:spawn] success, agentId:', agent.id)
-      // Mirror to cloud ONLY when the agent runs on a remote env — its pty
-      // lives on an SSH+tmux session the other devices can attach to. Local
-      // agents are device-bound (the pty is on this machine), so syncing
-      // them would give other clients an "attachable" tab that they can't
-      // actually reach. Local agents therefore live only in this device's
-      // SQLite. Awaited so the list refetch immediately after spawn sees
-      // the new agent on remote.
+      // v0.8.3: ALWAYS mirror to cloud, tagged with this device's id.
+      //
+      // Pre-0.8.3 we skipped the cloud write for local envs on the theory
+      // that "local agents can't be attached from another Mac, so hiding
+      // them is cleaner". In practice teammates were blind to what each
+      // other was running on their own machines, which broke the
+      // coordination story — two people on the same team could spawn
+      // overlapping work and not realise it. So now local agents ARE
+      // synced, with `execution_mode: 'local'` + our `device_id` so the
+      // peer client knows to render the row read-only and block
+      // attach/kill/delete (enforced here AND in the UI).
+      //
+      // Note this runs even for chat agents — ChatAgent already has its
+      // own cloud-sync path for transcripts, but the agent ROW itself
+      // still wants the device-ownership fields, so routing through the
+      // same createAgent keeps the shape uniform.
       const taskData = projectsRepo.getTaskWithEnvironment(taskId)
-      const isRemote = taskData?.environment.execution_mode === 'remote'
-      if (isRemote) {
-        await cloudWrite(cloudClient.createAgent(taskId, {
-          id: agent.id,
-          tab_name: agent.tab_name ?? undefined,
-          agent_type: agentType || 'claude',
-          prompt: agent.prompt ?? undefined,
-          status: agent.status,
-        }))
-      }
+      const executionMode: 'local' | 'remote' =
+        taskData?.environment.execution_mode === 'remote' ? 'remote' : 'local'
+      const deviceInfo = getDeviceInfo()
+      await cloudWrite(cloudClient.createAgent(taskId, {
+        id: agent.id,
+        tab_name: agent.tab_name ?? undefined,
+        agent_type: agentType || 'claude',
+        prompt: agent.prompt ?? undefined,
+        status: agent.status,
+        device_id: deviceInfo.device_id,
+        device_name: deviceInfo.device_name,
+        execution_mode: executionMode,
+      }))
       return agent
     } catch (err) {
       console.error('[agents:spawn] error:', err)
@@ -141,6 +188,12 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   })
 
   ipcMain.handle('agents:kill', async (_, agentId: string) => {
+    // v0.8.3: refuse kill on a foreign-local agent. If the row's PTY is on
+    // a different Mac, deleting the cloud row here would leave that Mac's
+    // AgentManager with a dangling runtime pointing at a tombstone. The
+    // owner device must be the one to kill it.
+    const refusal = refuseIfForeignLocal(agentId)
+    if (refusal) throw new Error(refusal)
     // Snapshot the tab_name BEFORE kill runs — agentManager.kill for
     // non-chat agents deletes the row, and we'd lose the ability to tell
     // chat from anything else afterwards.
@@ -164,6 +217,10 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   })
 
   ipcMain.handle('agents:delete', async (_, agentId: string) => {
+    // Same reasoning as kill: refusing here stops the "trash a local session
+    // from another Mac" footgun that would orphan the owner's PTY.
+    const refusal = refuseIfForeignLocal(agentId)
+    if (refusal) throw new Error(refusal)
     repo.delete(agentId)
     await cloudWrite(cloudClient.deleteAgent(agentId))
   })
@@ -197,6 +254,12 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   })
 
   ipcMain.handle('agents:ensure-attached', async (event, agentId: string) => {
+    // Foreign-local agents CAN'T be reattached from here — their PTY is on
+    // another Mac. Return cleanly with ok:false instead of throwing, so the
+    // renderer's terminal-panel-reattach effect just skips the attach and
+    // falls back to the "running on <device>" placeholder.
+    const refusal = refuseIfForeignLocal(agentId)
+    if (refusal) return { ok: false, message: refusal, foreignLocal: true }
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return { ok: false, message: 'No window' }
     try {
@@ -208,10 +271,15 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   })
 
   ipcMain.handle('agents:write-stdin', (_, agentId: string, data: string) => {
+    // Swallow stdin from non-owner devices instead of throwing — UI blocks
+    // input already, this is a defensive belt just in case a keystroke
+    // sneaks through before the render switches to the placeholder.
+    if (refuseIfForeignLocal(agentId)) return
     agentManager.writeStdin(agentId, data)
   })
 
   ipcMain.handle('agents:chat-send', (_, agentId: string, text: string) => {
+    if (refuseIfForeignLocal(agentId)) return { ok: false, message: 'Foreign-local chat' }
     const ok = agentManager.sendChatMessage(agentId, text)
     return { ok }
   })
@@ -255,6 +323,8 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
    * the user reopens a chat whose process died (tab close, app restart).
    */
   ipcMain.handle('agents:chat-restart', async (event, agentId: string) => {
+    const refusal = refuseIfForeignLocal(agentId)
+    if (refusal) return { ok: false, message: refusal }
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) return { ok: false, message: 'No window' }
     try {
@@ -276,11 +346,14 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
    * the transcript around for resume.
    */
   ipcMain.handle('agents:chat-delete', async (_, agentId: string) => {
+    const refusal = refuseIfForeignLocal(agentId)
+    if (refusal) throw new Error(refusal)
     agentManager.deleteChat(agentId)
     await cloudWrite(cloudClient.deleteAgent(agentId))
   })
 
   ipcMain.handle('agents:resize', (_, agentId: string, cols: number, rows: number) => {
+    if (refuseIfForeignLocal(agentId)) return
     agentManager.resize(agentId, cols, rows)
   })
 

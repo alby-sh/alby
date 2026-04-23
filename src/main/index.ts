@@ -275,7 +275,7 @@ app.whenReady().then(() => {
   registerTeamsIPC()
   registerDeployIPC(db, connectionPool, () => mainWindow)
   registerAppsIPC(db)
-  registerIssuesIPC(db)
+  registerIssuesIPC(db, connectionPool)
   registerReleasesIPC()
   registerWebhooksIPC()
   registerNotificationSubsIPC()

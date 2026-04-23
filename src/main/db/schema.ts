@@ -79,7 +79,15 @@ CREATE TABLE IF NOT EXISTS agents (
   sort_order INTEGER NOT NULL DEFAULT 0,
   -- For chat-type agents: the claude-code session id, used to resume the
   -- conversation with --resume after the process has exited.
-  chat_session_id TEXT
+  chat_session_id TEXT,
+  -- v0.8.3 cross-device visibility: every agent row carries a device_id so
+  -- teammates on other Macs can see local sessions in their sidebar and
+  -- render them as read-only with a "running on <device_name>" banner.
+  -- NULL on legacy rows; treated by the UI as "owner unknown" (pre-0.8.3
+  -- behaviour: remote = attachable, local = hidden from other devices).
+  device_id TEXT,
+  device_name TEXT,
+  execution_mode TEXT
 );
 
 -- Per-chat transcript log. Every JSON event the CLI streams is appended

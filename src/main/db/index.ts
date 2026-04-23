@@ -139,6 +139,19 @@ export function initDatabase(): Database.Database {
       UPDATE agents SET sort_order = (SELECT n FROM ordered WHERE ordered.id = agents.id)
     `)
   }
+  // v0.8.3: cross-device visibility. Three nullable columns that let the
+  // sidebar render local sessions from other Macs as read-only. Legacy rows
+  // keep NULL — the renderer treats that as "no owner info, behave pre-
+  // 0.8.3" so existing data works without backfill.
+  if (!agentColumns.some((c) => c.name === 'device_id')) {
+    db.exec('ALTER TABLE agents ADD COLUMN device_id TEXT')
+  }
+  if (!agentColumns.some((c) => c.name === 'device_name')) {
+    db.exec('ALTER TABLE agents ADD COLUMN device_name TEXT')
+  }
+  if (!agentColumns.some((c) => c.name === 'execution_mode')) {
+    db.exec('ALTER TABLE agents ADD COLUMN execution_mode TEXT')
+  }
 
   return db
 }

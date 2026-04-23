@@ -8,6 +8,8 @@ import { useAllAgents } from '../../hooks/useAgents'
 import { useActivityStore } from '../../stores/activity-store'
 import { useAppStore } from '../../stores/app-store'
 import { useUnreadStore } from '../../stores/unread-store'
+import { usePresenceFor } from '../../stores/presence-store'
+import { AvatarStack } from '../ui/AvatarStack'
 import { NewProjectDialog } from '../dialogs/NewProjectDialog'
 import { FaviconOrIdenticon } from '../ui/ProjectIcon'
 import { InstantTooltip } from '../ui/Tooltip'
@@ -74,6 +76,12 @@ function ProjectIcon({
   onDrop,
   onDragEnd,
 }: ProjectIconProps) {
+  // Live "who else is inside this project right now" from the
+  // `presence-project.<id>` Reverb channel. On my own icon stack this also
+  // reflects me (and my other devices, as distinct avatars) which is the
+  // intended UX — Alby explicitly supports multi-device presence so you can
+  // see "I'm on this project on desktop + laptop".
+  const viewers = usePresenceFor('project', project.id)
   return (
     <InstantTooltip label={project.name} side="right">
     <div
@@ -126,6 +134,21 @@ function ProjectIcon({
             </svg>
           </>
         )}
+        {/* Teammate / multi-device presence — tiny avatar stack anchored to
+         *  the bottom-right corner of the favicon. Positioned with negative
+         *  insets so bubbles sit half-over the icon's edge (same overlap
+         *  language GitHub uses for repo-row avatars). Only renders when
+         *  viewers > 0, so the vast majority of rows stay visually quiet. */}
+        {viewers.length > 0 && (
+          <div className="absolute -bottom-1 -right-1 pointer-events-none">
+            <AvatarStack
+              users={viewers}
+              max={2}
+              size="xs"
+              title={`In this project: ${viewers.map((v) => v.name).join(', ')}`}
+            />
+          </div>
+        )}
       </div>
     </div>
     </InstantTooltip>
@@ -146,11 +169,16 @@ export function IconNavSidebar() {
   // entry whose denorm projectId matches). Equivalent to calling
   // `hasProject(id)` for each project on every render, but we avoid the
   // function-level memo mismatch zustand has with derived selectors.
+  // byAgent / byRoutine included because agent / routine events now stamp
+  // ONLY the leaf (with denormalized parent ids) — not byProject — so the
+  // primary dot has to read through leaves for the rollup to light up.
   const unreadByProject = useUnreadStore((s) => s.byProject)
   const unreadByStack = useUnreadStore((s) => s.byStack)
   const unreadByEnvironment = useUnreadStore((s) => s.byEnvironment)
   const unreadByEnvPin = useUnreadStore((s) => s.byEnvPin)
   const unreadByStackPin = useUnreadStore((s) => s.byStackPin)
+  const unreadByAgent = useUnreadStore((s) => s.byAgent)
+  const unreadByRoutine = useUnreadStore((s) => s.byRoutine)
   const openProjectSettings = useAppStore((s) => s.openProjectSettings)
   const showAllProjects = useAppStore((s) => s.showAllProjects)
   const openAllProjects = useAppStore((s) => s.openAllProjects)
@@ -239,19 +267,32 @@ export function IconNavSidebar() {
         <div className="h-px w-6 bg-neutral-800 shrink-0" />
 
         <div className="flex flex-col gap-2 w-full items-center overflow-y-auto flex-1 min-h-0 no-scrollbar">
-          {visibleProjects.map((project) => (
-            <ProjectIcon
-              key={project.id}
-              project={project}
-              active={selectedProjectId === project.id && !showAllProjects}
-              working={!!workingByProject.get(project.id)}
-              unread={
+          {visibleProjects.map((project) => {
+            const isActive = selectedProjectId === project.id && !showAllProjects
+            // Skip the unread-dot computation entirely for the active
+            // project. Rationale: the user is already IN this project,
+            // seeing its secondary sidebar with per-row dots — a redundant
+            // dot on the primary icon would just nag them about what's in
+            // front of them. Mirrors the old `clear({projectId})` call
+            // that used to fire on `selectProject`, but expressed as a
+            // pure render-time guard so no store write is needed.
+            const hasUnread =
+              !isActive && (
                 !!unreadByProject[project.id] ||
                 Object.values(unreadByStack).some((e) => e.projectId === project.id) ||
                 Object.values(unreadByEnvironment).some((e) => e.projectId === project.id) ||
                 Object.values(unreadByEnvPin).some((e) => e.projectId === project.id) ||
-                Object.values(unreadByStackPin).some((e) => e.projectId === project.id)
-              }
+                Object.values(unreadByStackPin).some((e) => e.projectId === project.id) ||
+                Object.values(unreadByAgent).some((e) => e.projectId === project.id) ||
+                Object.values(unreadByRoutine).some((e) => e.projectId === project.id)
+              )
+            return (
+            <ProjectIcon
+              key={project.id}
+              project={project}
+              active={isActive}
+              working={!!workingByProject.get(project.id)}
+              unread={hasUnread}
               isDragOver={dragOverProjectId === project.id}
               onClick={() => handleClick(project)}
               onContextMenu={(e) => handleProjectContextMenu(e, project)}
@@ -296,7 +337,8 @@ export function IconNavSidebar() {
                 dragProjectRef.current = null
               }}
             />
-          ))}
+            )
+          })}
         </div>
 
         <div className="flex flex-col gap-2 w-full items-center shrink-0">

@@ -1,13 +1,135 @@
 import { ipcMain } from 'electron'
-import { execFile } from 'child_process'
+import { spawn } from 'child_process'
+import { existsSync } from 'fs'
 import type Database from 'better-sqlite3'
 import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
 import { IssuesRepo } from '../db/issues.repo'
-import type { Issue, IssueEvent, IssueListFilters, UpdateIssueDTO, CreateIssueDTO } from '../../shared/types'
+import { ProjectsRepo } from '../db/projects.repo'
+import type { ConnectionPool } from '../ssh/connection-pool'
+import type { Issue, IssueEvent, IssueListFilters, UpdateIssueDTO, CreateIssueDTO, Environment } from '../../shared/types'
 
-export function registerIssuesIPC(db: Database.Database): void {
+/** Escape a single argument for POSIX single-quoting: '…' with `'\''` for any
+ *  embedded quote. Mirrors the helper used in ChatAgent. */
+function sqEscape(s: string): string {
+  return s.replace(/'/g, `'\\''`)
+}
+
+/** Pick the user's interactive shell. Falls back to /bin/zsh (macOS default
+ *  since Catalina). Respecting $SHELL means the user's dotfiles — and in
+ *  particular their PATH customisations (nvm, asdf, brew, ~/.local/bin) —
+ *  are sourced, so `claude` / `gemini` / `codex` resolve the same way they
+ *  do in Terminal.app. */
+function pickShell(): string {
+  const s = process.env.SHELL
+  if (s && existsSync(s)) return s
+  return '/bin/zsh'
+}
+
+interface RunResult { stdout: string; stderr: string; code: number }
+
+/** Run `claude -p "<prompt>"` locally through a login+interactive shell.
+ *  Used when no target env is configured or the target env is local —
+ *  matches how ChatAgent spawns the same CLI so the user's full PATH is
+ *  visible. */
+function runClaudeLocal(prompt: string): Promise<RunResult> {
+  return new Promise((resolve, reject) => {
+    const shell = pickShell()
+    const inner = `claude -p '${sqEscape(prompt)}' --dangerously-skip-permissions`
+    const child = spawn(shell, ['-l', '-i', '-c', inner], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: process.env,
+    })
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      try { child.kill('SIGKILL') } catch { /* ignore */ }
+      reject(new Error('claude CLI timed out after 180s'))
+    }, 180_000)
+    child.stdout.on('data', (b: Buffer) => { stdout += b.toString('utf8') })
+    child.stderr.on('data', (b: Buffer) => { stderr += b.toString('utf8') })
+    child.on('error', (err) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      reject(err)
+    })
+    child.on('exit', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      resolve({ stdout, stderr, code: code ?? 0 })
+    })
+  })
+}
+
+/** Run `claude -p "<prompt>"` over SSH in the target env, sourcing the remote
+ *  user's login shell so their PATH (nvm / asdf / brew / npm-global) is live.
+ *  Used when the stack has an operational env configured — the user's issue
+ *  detector is on that box, and so is their authenticated `claude` install. */
+function runClaudeRemote(
+  connectionPool: ConnectionPool,
+  env: Environment,
+  prompt: string
+): Promise<RunResult> {
+  return new Promise(async (resolve, reject) => {
+    let client
+    try {
+      client = connectionPool.get(env.id) ?? (await connectionPool.getOrCreate(env))
+    } catch (err) {
+      reject(new Error(`SSH connect to ${env.name} failed: ${(err as Error).message}`))
+      return
+    }
+    const cwd = env.remote_path || '~'
+    const innerCmd =
+      `cd '${sqEscape(cwd)}' && claude -p '${sqEscape(prompt)}' --dangerously-skip-permissions`
+    const outer = `bash -l -c '${sqEscape(innerCmd)}'`
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      reject(new Error(`claude CLI on ${env.name} timed out after 180s`))
+    }, 180_000)
+    client.exec(outer, (err, channel) => {
+      if (err) {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        reject(new Error(`ssh exec failed: ${err.message}`))
+        return
+      }
+      channel.on('data', (d: Buffer) => { stdout += d.toString('utf8') })
+      channel.stderr.on('data', (d: Buffer) => { stderr += d.toString('utf8') })
+      channel.on('close', (code: number | null) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timeout)
+        resolve({ stdout, stderr, code: code ?? 0 })
+      })
+    })
+  })
+}
+
+/** Map `claude` exit-code 127 (the shell's "command not found") to a friendly
+ *  error, same as the old ENOENT case — but scoped so the "install it" hint
+ *  tells the user *where* the binary is missing (local Mac vs. their remote
+ *  issue env). */
+function notFoundMessage(location: string): string {
+  return (
+    `The \`claude\` CLI isn't installed or isn't on the PATH ${location}. ` +
+    `Install it from https://docs.anthropic.com/claude-code and make sure ` +
+    `\`claude --version\` works in an interactive shell ${location}.`
+  )
+}
+
+export function registerIssuesIPC(db: Database.Database, connectionPool: ConnectionPool): void {
   const repo = new IssuesRepo(db)
+  const projectsRepo = new ProjectsRepo(db)
 
   const safe = async <T,>(fn: () => Promise<T>, fallback: T): Promise<T> => {
     if (!(await loadToken())) return fallback
@@ -90,12 +212,24 @@ export function registerIssuesIPC(db: Database.Database): void {
   })
 
   /**
-   * Generate (or refine) the AI analysis for an issue by spawning a local
-   * `claude` CLI run with a carefully-framed prompt. The caller can supply
+   * Generate (or refine) the AI analysis for an issue by invoking the user's
+   * `claude` CLI with a carefully-framed prompt. The caller can supply
    * `extraInstruction` to iterate — e.g. the user typed "focus on the date
    * parser" and wants the analysis redone with that lens. The resulting
    * markdown is PATCHed back to the cloud and cached locally so every
    * device sees it.
+   *
+   * Where claude runs:
+   *   - If `envId` is provided and refers to a remote env, we run claude
+   *     OVER SSH inside that env's `remote_path`, through `bash -l -c '…'`.
+   *     This matches where `Fix with agent` would actually work, and it's
+   *     the only place `claude` is reliably installed for users who don't
+   *     have it on their local Mac.
+   *   - If the env is local OR no env is passed, we spawn claude via the
+   *     user's login+interactive shell (`$SHELL -l -i -c 'claude …'`) so
+   *     nvm / brew / ~/.local/bin are on PATH — the raw `process.env.PATH`
+   *     that a packaged Electron app inherits from launchd is
+   *     `/usr/bin:/bin:/usr/sbin:/sbin`, which never contains `claude`.
    *
    * We use the CLI rather than the Anthropic SDK because:
    *   (a) The user's `claude` binary is already authenticated on the box,
@@ -107,7 +241,7 @@ export function registerIssuesIPC(db: Database.Database): void {
    */
   ipcMain.handle(
     'issues:generate-analysis',
-    async (_, id: string, extraInstruction?: string): Promise<Issue> => {
+    async (_, id: string, extraInstruction?: string, envId?: string): Promise<Issue> => {
       // Hydrate the issue from cloud so our prompt uses the most recent fields
       // (the user may have just edited description / kind in another tab).
       const detail = await cloudClient.getIssue(id)
@@ -134,23 +268,43 @@ export function registerIssuesIPC(db: Database.Database): void {
         'Reply with ONLY the markdown analysis — no preamble, no code fences wrapping the whole thing.',
       ].filter(Boolean).join('\n')
 
-      const analysis = await new Promise<string>((resolve, reject) => {
-        execFile(
-          'claude',
-          ['-p', prompt, '--dangerously-skip-permissions'],
-          { maxBuffer: 4 * 1024 * 1024, timeout: 180_000 },
-          (err, stdout, stderr) => {
-            if (err) {
-              const msg = (err as NodeJS.ErrnoException).code === 'ENOENT'
-                ? "The `claude` CLI isn't installed or isn't on this app's PATH. Install it from https://docs.anthropic.com/claude-code and make sure `claude --version` works in a terminal."
-                : `claude CLI failed: ${(err as Error).message}${stderr ? `\n${stderr.trim()}` : ''}`
-              reject(new Error(msg))
-              return
-            }
-            resolve(stdout.trim())
-          }
+      // Pick where to run: remote env (when its SSH host has the user's
+      // authenticated `claude`), otherwise local. Deploy envs aren't
+      // operational boxes, so skip them — fall back to local.
+      const env = envId ? projectsRepo.getEnvironment(envId) : null
+      const useRemote = !!env && env.execution_mode === 'remote' && env.role !== 'deploy'
+      const location = useRemote ? `on ${env!.name}` : 'on this Mac'
+
+      let result: RunResult
+      try {
+        result = useRemote
+          ? await runClaudeRemote(connectionPool, env!, prompt)
+          : await runClaudeLocal(prompt)
+      } catch (err) {
+        throw new Error(`claude CLI failed ${location}: ${(err as Error).message}`)
+      }
+
+      // Shells report 127 when the command isn't on PATH. Surface the same
+      // "install it" guidance the old ENOENT branch used to, but pointing at
+      // the right box.
+      if (result.code === 127) {
+        throw new Error(notFoundMessage(location))
+      }
+      if (result.code !== 0) {
+        const tail = result.stderr.trim() || result.stdout.trim()
+        throw new Error(
+          `claude CLI failed ${location} (exit ${result.code})${tail ? `:\n${tail}` : ''}`
         )
-      })
+      }
+
+      const analysis = result.stdout.trim()
+      if (!analysis) {
+        const tail = result.stderr.trim()
+        throw new Error(
+          `claude CLI returned no output ${location}.` +
+            (tail ? `\nstderr:\n${tail}` : '')
+        )
+      }
 
       const updated = await cloudClient.updateIssue(id, { analysis })
       mirror(() => repo.upsertFromCloud(updated))

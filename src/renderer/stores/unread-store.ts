@@ -85,8 +85,47 @@ interface PersistedState {
   byRoutine: Record<string, UnreadEntryWithContext>
 }
 
+/**
+ * Context used by `markLeaf` to denormalize parent ids onto a leaf entry.
+ * Matches the denorm slots on `UnreadEntryWithContext` so the rollup scans
+ * in the sidebars (which filter by `e.projectId === id` / `e.stackId === id`
+ * / `e.environmentId === id`) pick up the leaf automatically.
+ */
+export interface UnreadLeafContext {
+  projectId?: string
+  stackId?: string
+  environmentId?: string
+}
+
+/**
+ * Leaf variant of the scope — only "leaf" ids are allowed. `markLeaf` stamps
+ * ONLY the matching leaf map (byAgent / byRoutine / byStackPin / byEnvPin),
+ * with denormalized parent ids attached. Use for events that have a natural
+ * leaf in the UI (a specific agent row, a specific issue tab). Parent-level
+ * dots (project, stack, env, pins) light up via the rollup scans in the
+ * sidebars — no explicit stamping needed.
+ */
+export type UnreadLeaf =
+  | { agentId: string }
+  | { routineId: string }
+  | { stackPin: { stackId: string; pinKey: StackPinKey } }
+  | { envPin: { environmentId: string; pinKey: EnvPinKey } }
+
 interface UnreadState extends PersistedState {
   mark: (scope: UnreadScope, reason: UnreadReason) => void
+  /**
+   * Mark a single leaf with a full denormalized parent chain. Preferred over
+   * `mark()` for agent / routine / issue events — the rollup scans in
+   * `IconNavSidebar` and `Sidebar` light up every parent level without us
+   * having to stamp byProject / byStack / byEnvironment separately.
+   *
+   * The design win: a click on the leaf row (which calls `clear({agentId})`
+   * etc.) cascades up automatically — remove the leaf and every parent dot
+   * re-evaluates in the next render, going dark unless another leaf under
+   * the same parent is still pending. No "clear if this was the last one"
+   * bookkeeping required.
+   */
+  markLeaf: (leaf: UnreadLeaf, reason: UnreadReason, context: UnreadLeafContext) => void
   clear: (scope: UnreadScope) => void
   clearAll: () => void
   hasProject: (projectId: string) => boolean
@@ -228,6 +267,47 @@ export const useUnreadStore = create<UnreadState>((set, get) => ({
         dirty = true
       }
       if (!dirty) return s
+      save(next)
+      return next
+    })
+  },
+
+  markLeaf: (leaf, reason, context) => {
+    set((s) => {
+      const next: PersistedState = {
+        byProject: s.byProject,
+        byStack: s.byStack,
+        byEnvironment: s.byEnvironment,
+        byEnvPin: s.byEnvPin,
+        byStackPin: s.byStackPin,
+        byAgent: s.byAgent,
+        byRoutine: s.byRoutine,
+      }
+      if ('agentId' in leaf) {
+        next.byAgent = {
+          ...s.byAgent,
+          [leaf.agentId]: bumpEntry(s.byAgent[leaf.agentId], reason, context),
+        }
+      } else if ('routineId' in leaf) {
+        next.byRoutine = {
+          ...s.byRoutine,
+          [leaf.routineId]: bumpEntry(s.byRoutine[leaf.routineId], reason, context),
+        }
+      } else if ('stackPin' in leaf) {
+        const key = `${leaf.stackPin.stackId}::${leaf.stackPin.pinKey}`
+        next.byStackPin = {
+          ...s.byStackPin,
+          [key]: bumpEntry(s.byStackPin[key], reason, context),
+        }
+      } else if ('envPin' in leaf) {
+        const key = `${leaf.envPin.environmentId}::${leaf.envPin.pinKey}`
+        next.byEnvPin = {
+          ...s.byEnvPin,
+          [key]: bumpEntry(s.byEnvPin[key], reason, context),
+        }
+      } else {
+        return s
+      }
       save(next)
       return next
     })

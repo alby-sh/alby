@@ -198,6 +198,12 @@ export const cloudClient = {
   // Returns every running agent the current user can see, pre-joined with
   // task + environment so the desktop can reconnect without issuing N+1
   // lookups. Used by the main process on boot to reattach tmux sessions.
+  /** v0.8.3: response now includes `device_id`, `device_name`, and
+   *  `execution_mode` per agent (denormalised from env so the renderer can
+   *  pick "foreign local" without a JOIN at render time). Legacy backend
+   *  deployments that haven't been upgraded yet will simply omit the three
+   *  fields and the client treats the rows as "owner unknown" (pre-0.8.3
+   *  behaviour). */
   listAllRunningAgents(): Promise<Array<Agent & {
     task?: { id: string; environment_id: string; title: string; environment?: {
       id: string; project_id: string; name: string; label: string | null;
@@ -207,7 +213,22 @@ export const cloudClient = {
   }>> {
     return request('GET', '/api/agents/running')
   },
-  createAgent(taskId: string, data: { id?: string; tab_name?: string; agent_type: string; prompt?: string; status?: string }): Promise<Agent> {
+  /** v0.8.3: `device_id` / `device_name` / `execution_mode` are now always
+   *  sent on create so the backend can expose the row to other devices as
+   *  "running on <device_name>, read-only from here" when execution_mode is
+   *  local. The backend treats these as nullable (legacy clients still work)
+   *  and broadcasts them back verbatim via `listAllRunningAgents` + the
+   *  `entity.changed` websocket event so every client converges. */
+  createAgent(taskId: string, data: {
+    id?: string
+    tab_name?: string
+    agent_type: string
+    prompt?: string
+    status?: string
+    device_id?: string
+    device_name?: string
+    execution_mode?: 'local' | 'remote'
+  }): Promise<Agent> {
     return request('POST', `/api/tasks/${taskId}/agents`, data)
   },
   updateAgent(id: string, data: Partial<Pick<Agent, 'tab_name' | 'status' | 'exit_code' | 'started_at' | 'finished_at'>> & { chat_session_id?: string | null }): Promise<Agent> {

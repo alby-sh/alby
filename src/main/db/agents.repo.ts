@@ -21,6 +21,12 @@ export class AgentsRepo {
     status: AgentStatus
     prompt: string
     started_at: string
+    /** v0.8.3: device ownership fields. Always populated by AgentManager
+     *  when it creates a new agent — identifies which Mac owns the PTY so
+     *  other devices can render the row as read-only. */
+    device_id?: string
+    device_name?: string
+    execution_mode?: 'local' | 'remote'
   }): Agent {
     const id = uuid()
     // New agents go to the bottom of the task's list — same convention as
@@ -33,10 +39,21 @@ export class AgentsRepo {
     ).m + 1
     this.db
       .prepare(
-        `INSERT INTO agents (id, task_id, tab_name, status, prompt, started_at, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO agents (id, task_id, tab_name, status, prompt, started_at, sort_order, device_id, device_name, execution_mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, data.task_id, data.tab_name, data.status, data.prompt, data.started_at, nextOrder)
+      .run(
+        id,
+        data.task_id,
+        data.tab_name,
+        data.status,
+        data.prompt,
+        data.started_at,
+        nextOrder,
+        data.device_id ?? null,
+        data.device_name ?? null,
+        data.execution_mode ?? null,
+      )
     return this.get(id)!
   }
 
@@ -105,8 +122,8 @@ export class AgentsRepo {
     ).m + 1
     this.db
       .prepare(
-        `INSERT INTO agents (id, task_id, tab_name, status, prompt, exit_code, started_at, finished_at, sort_order)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO agents (id, task_id, tab_name, status, prompt, exit_code, started_at, finished_at, sort_order, device_id, device_name, execution_mode)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            task_id = excluded.task_id,
            tab_name = excluded.tab_name,
@@ -114,7 +131,10 @@ export class AgentsRepo {
            prompt = excluded.prompt,
            exit_code = excluded.exit_code,
            started_at = excluded.started_at,
-           finished_at = excluded.finished_at`
+           finished_at = excluded.finished_at,
+           device_id = COALESCE(excluded.device_id, agents.device_id),
+           device_name = COALESCE(excluded.device_name, agents.device_name),
+           execution_mode = COALESCE(excluded.execution_mode, agents.execution_mode)`
       )
       .run(
         agent.id,
@@ -125,7 +145,10 @@ export class AgentsRepo {
         agent.exit_code ?? null,
         agent.started_at ?? null,
         agent.finished_at ?? null,
-        nextOrder
+        nextOrder,
+        agent.device_id ?? null,
+        agent.device_name ?? null,
+        agent.execution_mode ?? null,
       )
   }
 

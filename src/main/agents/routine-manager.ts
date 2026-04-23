@@ -35,7 +35,16 @@ export class RoutineManager {
     return `/tmp/.routine-${routineId.substring(0, 8)}.sh`
   }
 
-  private buildLoopScript(routine: Routine, remotePath: string): string {
+  private buildLoopScript(routine: Routine, remotePath: string, extraInput?: string): string {
+    // The final prompt sent to the CLI is the stored prompt + any one-off
+    // input the user typed in the RoutineView before pressing Start (manual
+    // routines only — scheduled ones don't have a UI to collect it). We keep
+    // them separated by a blank line so the base prompt stays intact and the
+    // addendum reads as fresh context rather than a continuation.
+    const promptForRun = extraInput && extraInput.trim().length > 0
+      ? `${routine.prompt}\n\n${extraInput.trim()}`
+      : routine.prompt
+
     // Force line-buffered stdout/stderr so the user sees output as soon as the
     // agent CLI emits each line, instead of one big wall at the end. Without
     // `stdbuf`, some CLIs (Python-backed ones especially) detect they're not
@@ -45,7 +54,7 @@ export class RoutineManager {
     // that don't ship `stdbuf` (busybox / macOS without coreutils).
     const agentCmd =
       `(command -v stdbuf >/dev/null && stdbuf -oL -eL ${routine.agent_type} ` +
-      `|| ${routine.agent_type}) --dangerously-skip-permissions -p "${shellEscape(routine.prompt)}"`
+      `|| ${routine.agent_type}) --dangerously-skip-permissions -p "${shellEscape(promptForRun)}"`
     const header = [
       '#!/bin/bash',
       `# Routine: ${routine.name}`,
@@ -177,7 +186,7 @@ export class RoutineManager {
     return { env, sshClient }
   }
 
-  async start(routineId: string, win: BrowserWindow): Promise<Routine> {
+  async start(routineId: string, win: BrowserWindow, extraInput?: string): Promise<Routine> {
     const routine = this.routinesRepo.get(routineId)
     if (!routine) throw new Error(`Routine not found: ${routineId}`)
     if (this.running.has(routineId)) return routine
@@ -201,7 +210,11 @@ export class RoutineManager {
     const scriptPath = this.scriptPath(routineId)
 
     // Upload the loop script, then let RemoteAgent open tmux + attach.
-    const loopContent = this.buildLoopScript(routine, env.remote_path)
+    // Scheduled routines ignore extraInput — the textarea is only rendered
+    // for manual ones, but guard here too so future UI changes can't leak
+    // a typed addendum into a cron run without us noticing.
+    const isManual = (routine.interval_seconds ?? 0) <= 0 && !routine.cron_expression
+    const loopContent = this.buildLoopScript(routine, env.remote_path, isManual ? extraInput : undefined)
     console.log(`[RoutineManager] uploading loop script to ${scriptPath} (${loopContent.length} bytes)`)
     try {
       await this.writeScript(sshClient, scriptPath, loopContent)

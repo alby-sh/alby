@@ -96,11 +96,11 @@ export function registerRoutinesIPC(db: Database.Database, routineManager: Routi
 
   // --- Runtime (local only; tmux on remote server) ---
 
-  ipcMain.handle('routines:start', async (event, id: string) => {
+  ipcMain.handle('routines:start', async (event, id: string, extraInput?: string) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('No window found')
     try {
-      return await routineManager.start(id, win)
+      return await routineManager.start(id, win, extraInput)
     } catch (err) {
       console.error(`[routines:start] failed for ${id}:`, err)
       throw err
