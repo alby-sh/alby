@@ -101,6 +101,27 @@ export function initDatabase(): Database.Database {
     `)
   }
 
+  // v0.8.2: per-routine user allow-list (JSON array of numeric user IDs).
+  // When null/empty, role-based access applies; otherwise listed users can
+  // start the routine even if their role lacks `manage_routines`.
+  const routineColsAfter = db.prepare("PRAGMA table_info('routines')").all() as { name: string }[]
+  if (!routineColsAfter.some((c) => c.name === 'allowed_users')) {
+    db.exec('ALTER TABLE routines ADD COLUMN allowed_users TEXT')
+  }
+
+  // v0.8.2: issues grow a kind ('bug'|'feature'), an analysis markdown blob,
+  // a description, a source ('sdk'|'manual') and a created_by_user_id — some
+  // of those were declared on the Issue TS type earlier but the local cache
+  // table was never updated to hold them (rows were always null). Backfill
+  // idempotently.
+  const issueCols = db.prepare("PRAGMA table_info('issues')").all() as { name: string }[]
+  const issueHas = (name: string): boolean => issueCols.some((c) => c.name === name)
+  if (!issueHas('description')) db.exec('ALTER TABLE issues ADD COLUMN description TEXT')
+  if (!issueHas('kind')) db.exec("ALTER TABLE issues ADD COLUMN kind TEXT NOT NULL DEFAULT 'bug'")
+  if (!issueHas('analysis')) db.exec('ALTER TABLE issues ADD COLUMN analysis TEXT')
+  if (!issueHas('source')) db.exec("ALTER TABLE issues ADD COLUMN source TEXT NOT NULL DEFAULT 'sdk'")
+  if (!issueHas('created_by_user_id')) db.exec('ALTER TABLE issues ADD COLUMN created_by_user_id INTEGER')
+
   const agentColumns = db.prepare("PRAGMA table_info('agents')").all() as { name: string }[]
   if (!agentColumns.some((c) => c.name === 'chat_session_id')) {
     db.exec('ALTER TABLE agents ADD COLUMN chat_session_id TEXT')

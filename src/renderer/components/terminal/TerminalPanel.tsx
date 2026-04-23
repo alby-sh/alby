@@ -200,6 +200,38 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
         term.clearSelection()
         return false // prevent default
       }
+
+      // macOS-native navigation shortcuts (Cmd + arrow). xterm.js doesn't
+      // intercept the Meta modifier by default — it just drops it and passes
+      // the plain arrow byte to the pty, which is why the user's Cmd+Left
+      // was "doing nothing visible". Translate them ourselves:
+      //   Cmd+Left  → Ctrl-A  (readline beginning-of-line; works in bash,
+      //               zsh, Claude's prompt editor, Python REPL, Node, …)
+      //   Cmd+Right → Ctrl-E  (readline end-of-line; same support matrix)
+      //   Cmd+Up    → scroll viewport to the top. In the alternate buffer
+      //               (Claude / Gemini / Codex / vim / less …) send a burst
+      //               of PageUp so the TUI scrolls its own history — mirrors
+      //               how the wheel handler behaves.
+      //   Cmd+Down  → symmetric: scroll to bottom, or burst PageDown.
+      if (e.type === 'keydown' && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+        const writer = kind === 'routine'
+          ? window.electronAPI.routines.writeStdin
+          : window.electronAPI.agents.writeStdin
+        if (e.key === 'ArrowLeft') { void writer(agentId, '\x01'); return false }
+        if (e.key === 'ArrowRight') { void writer(agentId, '\x05'); return false }
+        if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+          const alt = term.buffer.active.type === 'alternate'
+          const isUp = e.key === 'ArrowUp'
+          if (alt) {
+            const seq = isUp ? '\x1b[5~' : '\x1b[6~'
+            for (let i = 0; i < 8; i++) void writer(agentId, seq)
+          } else {
+            if (isUp) term.scrollToTop()
+            else term.scrollToBottom()
+          }
+          return false
+        }
+      }
       if (
         e.key === 'Enter' &&
         e.shiftKey &&

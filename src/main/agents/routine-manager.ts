@@ -63,10 +63,14 @@ export class RoutineManager {
     // looks stuck. The echo is the user's proof the script got past setup.
     const invokeEcho =
       `echo -e "\\033[2m[routine] invoking ${routine.agent_type} — first response can take 10–30s on a cold start…\\033[0m"`
-    // Manual-only routines (interval null / 0) run the agent once and exit.
-    // No while-loop, so the user sees the output and the tmux session
-    // naturally closes when the agent finishes — same ergonomics as a
-    // regular Claude tab except kicked off by the Start button.
+    // Manual-only routines (interval null / 0) run the agent once, then
+    // PARK the session on a blocking `tail -f /dev/null` so the tmux buffer
+    // survives for the user to scroll through. If we let bash fall off the
+    // end of the script instead, tmux would kill the session the moment the
+    // agent CLI exits — the user would see "Routine is stopped, last exit
+    // code: 0" (the "bug" fixed in v0.8.2) and all output would be lost in
+    // the round-trip before the UI could catch up. The SIGTERM trap at the
+    // top of the script makes the Stop button cleanly exit the `tail`.
     const interval = routine.interval_seconds ?? 0
     if (!interval || interval <= 0) {
       return [
@@ -76,6 +80,9 @@ export class RoutineManager {
         agentCmd,
         'rc=$?',
         `echo -e "\\033[36m[routine] run finished (exit $rc)\\033[0m"`,
+        `echo -e "\\033[2m[routine] session left open for review — click Stop (or Ctrl+C in the pane) when you're done.\\033[0m"`,
+        'tail -f /dev/null &',
+        'wait $!',
         'exit $rc',
         ''
       ].join('\n')
@@ -234,6 +241,20 @@ export class RoutineManager {
     await new Promise((r) => setTimeout(r, 800))
     const alive = await this.sessionAlive(sshClient, sessionName)
     if (!alive) {
+      // Two sub-cases here:
+      //   a) The exit handler already fired (routine crashed / finished super
+      //      fast — possible even with tail -f /dev/null if bash itself can't
+      //      start). `this.running` no longer has the routine; markStopped
+      //      has already recorded the real exit code. Return silently —
+      //      throwing now would race the UI into showing a toast for a
+      //      routine that already updated its status.
+      //   b) The session genuinely never came up (tmux missing, script path
+      //      wrong, bash not found). `this.running` still has the routine
+      //      because exit never fired. THIS is the original failure path.
+      if (!this.running.has(routineId)) {
+        console.warn(`[RoutineManager] routine ${routineId} finished before sessionAlive check — treating as normal completion`)
+        return this.routinesRepo.get(routineId)!
+      }
       console.error(`[RoutineManager] session ${sessionName} did not come up`)
       this.running.delete(routineId)
       try { await runner.kill() } catch { /* ignore */ }

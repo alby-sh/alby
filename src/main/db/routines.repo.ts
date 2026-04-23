@@ -2,23 +2,50 @@ import Database from 'better-sqlite3'
 import { v4 as uuid } from 'uuid'
 import type { Routine, CreateRoutineDTO, UpdateRoutineDTO } from '../../shared/types'
 
+/** The raw row as SQLite stores it — allowed_users is a JSON string. */
+interface RoutineRow extends Omit<Routine, 'allowed_user_ids'> {
+  allowed_users: string | null
+}
+
+function rowToRoutine(row: RoutineRow | undefined): Routine | undefined {
+  if (!row) return undefined
+  let allowed: number[] | null = null
+  if (row.allowed_users) {
+    try {
+      const parsed = JSON.parse(row.allowed_users)
+      if (Array.isArray(parsed)) allowed = parsed.filter((n) => typeof n === 'number')
+    } catch { /* malformed JSON — treat as no allow-list */ }
+  }
+  // Strip the raw column and expose the parsed array under the canonical name.
+  const { allowed_users: _ignored, ...rest } = row
+  void _ignored
+  return { ...rest, allowed_user_ids: allowed } as Routine
+}
+
+function stringifyAllowed(ids: number[] | null | undefined): string | null {
+  if (!ids || !Array.isArray(ids) || ids.length === 0) return null
+  return JSON.stringify(ids.filter((n) => typeof n === 'number'))
+}
+
 export class RoutinesRepo {
   constructor(private db: Database.Database) {}
 
   list(): Routine[] {
-    return this.db
+    return (this.db
       .prepare('SELECT * FROM routines ORDER BY environment_id, sort_order, created_at')
-      .all() as Routine[]
+      .all() as RoutineRow[])
+      .map((r) => rowToRoutine(r)!)
   }
 
   listByEnvironment(environmentId: string): Routine[] {
-    return this.db
+    return (this.db
       .prepare('SELECT * FROM routines WHERE environment_id = ? ORDER BY sort_order, created_at')
-      .all(environmentId) as Routine[]
+      .all(environmentId) as RoutineRow[])
+      .map((r) => rowToRoutine(r)!)
   }
 
   get(id: string): Routine | undefined {
-    return this.db.prepare('SELECT * FROM routines WHERE id = ?').get(id) as Routine | undefined
+    return rowToRoutine(this.db.prepare('SELECT * FROM routines WHERE id = ?').get(id) as RoutineRow | undefined)
   }
 
   create(data: CreateRoutineDTO): Routine {
@@ -32,8 +59,8 @@ export class RoutinesRepo {
       .prepare(
         `INSERT INTO routines (
            id, environment_id, name, cron_expression, interval_seconds,
-           agent_type, prompt, enabled, sort_order
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)`
+           agent_type, prompt, enabled, sort_order, allowed_users
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`
       )
       .run(
         id,
@@ -43,7 +70,8 @@ export class RoutinesRepo {
         data.interval_seconds ?? null,
         data.agent_type,
         data.prompt,
-        maxOrder + 1
+        maxOrder + 1,
+        stringifyAllowed(data.allowed_user_ids)
       )
     return this.get(id)!
   }
@@ -52,10 +80,15 @@ export class RoutinesRepo {
     const fields: string[] = []
     const values: unknown[] = []
     for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) {
-        fields.push(`${key} = ?`)
-        values.push(value)
+      if (value === undefined) continue
+      if (key === 'allowed_user_ids') {
+        // Translate the public field into the internal TEXT column.
+        fields.push('allowed_users = ?')
+        values.push(stringifyAllowed(value as number[] | null | undefined))
+        continue
       }
+      fields.push(`${key} = ?`)
+      values.push(value)
     }
     if (fields.length > 0) {
       values.push(id)
@@ -77,9 +110,10 @@ export class RoutinesRepo {
   }
 
   listRunning(): Routine[] {
-    return this.db
+    return (this.db
       .prepare('SELECT * FROM routines WHERE tmux_session_name IS NOT NULL')
-      .all() as Routine[]
+      .all() as RoutineRow[])
+      .map((r) => rowToRoutine(r)!)
   }
 
   delete(id: string): void {
@@ -111,8 +145,8 @@ export class RoutinesRepo {
       .prepare(
         `INSERT INTO routines (
            id, environment_id, name, cron_expression, interval_seconds,
-           agent_type, prompt, enabled, sort_order
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           agent_type, prompt, enabled, sort_order, allowed_users
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            environment_id = excluded.environment_id,
            name = excluded.name,
@@ -121,7 +155,8 @@ export class RoutinesRepo {
            agent_type = excluded.agent_type,
            prompt = excluded.prompt,
            enabled = excluded.enabled,
-           sort_order = excluded.sort_order`
+           sort_order = excluded.sort_order,
+           allowed_users = excluded.allowed_users`
       )
       .run(
         routine.id,
@@ -132,7 +167,8 @@ export class RoutinesRepo {
         routine.agent_type,
         routine.prompt,
         routine.enabled ? 1 : 0,
-        routine.sort_order ?? 0
+        routine.sort_order ?? 0,
+        stringifyAllowed(routine.allowed_user_ids ?? null)
       )
   }
 }

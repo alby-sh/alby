@@ -5,6 +5,7 @@ import { useAllRoutines, useDeleteRoutine, useStartRoutine, useStopRoutine, useU
 import { useAppStore } from '../../stores/app-store'
 import type { Routine, RoutineAgentType } from '../../../shared/types'
 import { parseCronToInterval, intervalToPresetLabel } from '../../../shared/cron-parser'
+import { RoutineAllowlistPicker } from '../ui/RoutineAllowlistPicker'
 
 function Section({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
   return (
@@ -72,6 +73,7 @@ export function RoutineSettingsView({ routineId }: { routineId: string }) {
   const [agentType, setAgentType] = useState<RoutineAgentType>('claude')
   const [prompt, setPrompt] = useState('')
   const [enabled, setEnabled] = useState(true)
+  const [allowedUserIds, setAllowedUserIds] = useState<number[] | null>(null)
   const [savedKey, setSavedKey] = useState<string | null>(null)
   const [copied, setCopied] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
@@ -84,6 +86,7 @@ export function RoutineSettingsView({ routineId }: { routineId: string }) {
       setAgentType(routine.agent_type)
       setPrompt(routine.prompt)
       setEnabled(!!routine.enabled)
+      setAllowedUserIds(routine.allowed_user_ids ?? null)
     }
   }, [routine])
 
@@ -282,6 +285,24 @@ export function RoutineSettingsView({ routineId }: { routineId: string }) {
                 {savedKey === 'enabled' && <span className="text-[11px] text-emerald-400 ml-2">Saved</span>}
               </label>
             </Section>
+
+            {isManual && (
+              <Section
+                title="Delegation"
+                description="Pick team members who can Start this routine even if their role wouldn't normally let them. Leave empty to fall back to role-based access."
+              >
+                <div className="space-y-3">
+                  <RoutineAllowlistPicker
+                    value={allowedUserIds}
+                    onChange={(next) => {
+                      setAllowedUserIds(next)
+                      saveField({ allowed_user_ids: next }, 'delegation')
+                    }}
+                  />
+                  {savedKey === 'delegation' && <span className="text-[11px] text-emerald-400">Saved</span>}
+                </div>
+              </Section>
+            )}
 
             <Section title="Routine Info" description="Read-only metadata.">
               <dl className="space-y-3 text-[13px]">

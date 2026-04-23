@@ -3,6 +3,7 @@ import { useCreateRoutine } from '../../hooks/useRoutines'
 import { parseCronToInterval } from '../../../shared/cron-parser'
 import type { RoutineAgentType } from '../../../shared/types'
 import { useEnvironment } from '../../hooks/useProjects'
+import { RoutineAllowlistPicker } from '../ui/RoutineAllowlistPicker'
 
 interface Props {
   environmentId: string
@@ -38,6 +39,7 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
   const [presetCron, setPresetCron] = useState(PRESETS[0].cron)
   const [customCron, setCustomCron] = useState('*/5 * * * *')
   const [prompt, setPrompt] = useState('')
+  const [allowedUserIds, setAllowedUserIds] = useState<number[] | null>(null)
   const createRoutine = useCreateRoutine()
 
   const currentCron = mode === 'preset' ? presetCron : mode === 'custom' ? customCron.trim() : ''
@@ -63,6 +65,10 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
         interval_seconds: mode === 'manual' ? null : parsed!.intervalSeconds,
         agent_type: agentType,
         prompt: prompt.trim(),
+        // Only persist the allow-list for manual routines — for scheduled
+        // runs the system triggers them autonomously and delegation has no
+        // meaning.
+        allowed_user_ids: mode === 'manual' ? allowedUserIds : null,
       },
       { onSuccess: () => onClose() }
     )
@@ -168,6 +174,13 @@ export function NewRoutineDialog({ environmentId, onClose }: Props) {
               </p>
             )}
           </div>
+
+          {mode === 'manual' && (
+            <div className="mb-4">
+              <label className="block text-sm text-[var(--text-secondary)] mb-1">Delegate Start to (optional)</label>
+              <RoutineAllowlistPicker value={allowedUserIds} onChange={setAllowedUserIds} />
+            </div>
+          )}
 
           <div className="mb-6">
             <label className="block text-sm text-[var(--text-secondary)] mb-1">Prompt</label>

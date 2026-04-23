@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, Close, TrashCan } from '@carbon/icons-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '../../stores/app-store'
 import { useIssue, useIssueEvents, useUpdateIssue, useDeleteIssue, useApps } from '../../hooks/useIssues'
 import { useEnvironments } from '../../hooks/useProjects'
@@ -30,6 +31,17 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
   const [fixing, setFixing] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // Analysis editor state (v0.8.2). Seeded from the issue once loaded.
+  // A local buffer lets the user edit freely without a save-per-keystroke
+  // storm — explicit Save button commits it.
+  const [analysisDraft, setAnalysisDraft] = useState<string>('')
+  const [analysisDirty, setAnalysisDirty] = useState(false)
+  const [analysisSaving, setAnalysisSaving] = useState(false)
+  const [analysisSaved, setAnalysisSaved] = useState(false)
+  const [analysisGenerating, setAnalysisGenerating] = useState(false)
+  const [analysisError, setAnalysisError] = useState<string | null>(null)
+  const [refinementTurn, setRefinementTurn] = useState('')
+  const qc = useQueryClient()
 
   // Resolve the stack + target env for this issue. Prefers the env the user
   // installed the detector in (i.e. the app's env), because that's where the
@@ -78,6 +90,14 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
     }
   }, [data, environments, stacks, apps])
 
+  // Sync the analysis buffer whenever the source issue changes. Runs on
+  // first load and after a successful generate/save round-trip.
+  useEffect(() => {
+    if (!data) return
+    setAnalysisDraft(data.issue.analysis ?? '')
+    setAnalysisDirty(false)
+  }, [data?.issue.id, data?.issue.analysis])
+
   if (isLoading || !data) {
     return (
       <div className="flex-1 flex items-center justify-center bg-neutral-950 text-neutral-500 text-sm">
@@ -92,6 +112,48 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
 
   const setStatus = (status: IssueStatus) => {
     updateIssue.mutate({ id: issue.id, data: { status } })
+  }
+
+  const runGenerateAnalysis = async (extraInstruction?: string): Promise<void> => {
+    setAnalysisGenerating(true)
+    setAnalysisError(null)
+    setAnalysisSaved(false)
+    try {
+      const updated = (await (window.electronAPI.issues as unknown as {
+        generateAnalysis: (id: string, extra?: string) => Promise<Issue>
+      }).generateAnalysis(issue.id, extraInstruction || undefined)) as Issue
+      setAnalysisDraft(updated.analysis ?? '')
+      setAnalysisDirty(false)
+      setRefinementTurn('')
+      // Force a refetch so the rest of the view sees the new analysis on
+      // the persisted issue.
+      qc.invalidateQueries({ queryKey: ['issue', issue.id] })
+    } catch (e) {
+      setAnalysisError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAnalysisGenerating(false)
+    }
+  }
+
+  const saveAnalysis = async (): Promise<void> => {
+    setAnalysisSaving(true)
+    setAnalysisError(null)
+    setAnalysisSaved(false)
+    try {
+      await new Promise<void>((resolve, reject) => {
+        updateIssue.mutate(
+          { id: issue.id, data: { analysis: analysisDraft } },
+          { onSuccess: () => resolve(), onError: (err) => reject(err) }
+        )
+      })
+      setAnalysisDirty(false)
+      setAnalysisSaved(true)
+      window.setTimeout(() => setAnalysisSaved(false), 1500)
+    } catch (e) {
+      setAnalysisError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setAnalysisSaving(false)
+    }
   }
 
   const spawnFixAgent = async (): Promise<void> => {
@@ -163,6 +225,15 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
         </button>
         <h1 className="text-sm font-semibold text-neutral-200 truncate">{issue.title}</h1>
         <div className="ml-auto flex items-center gap-2">
+          {issue.kind === 'feature' ? (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-violet-900/50 text-violet-300">
+              ✨ Feature
+            </span>
+          ) : (
+            <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-orange-900/40 text-orange-300">
+              🐞 Bug
+            </span>
+          )}
           <span
             className={`text-[10px] uppercase tracking-wider px-2 py-0.5 rounded ${
               issue.status === 'open'
@@ -285,6 +356,94 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
                 </div>
               </Section>
             )}
+
+            {/* v0.8.2 — AI analysis.
+                Generate runs `claude -p` locally, then saves the output.
+                The textarea is a free-form editor so the user can hand-tune
+                the analysis before clicking Fix with agent. The refinement
+                input lets them ask Claude to rewrite with extra guidance
+                ("focus on the date parser") without having to paste context. */}
+            <Section title={issue.kind === 'feature' ? 'Feature analysis' : 'Bug analysis'}>
+              <div className="space-y-3">
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => runGenerateAnalysis()}
+                    disabled={analysisGenerating}
+                    className="text-xs px-3 py-1.5 rounded bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white inline-flex items-center gap-1.5"
+                  >
+                    {analysisGenerating
+                      ? 'Claude is thinking…'
+                      : analysisDraft
+                        ? 'Regenerate analysis'
+                        : 'Generate analysis with Claude'}
+                  </button>
+                  {analysisDirty && !analysisSaving && (
+                    <button
+                      type="button"
+                      onClick={saveAnalysis}
+                      disabled={analysisSaving}
+                      className="text-xs px-3 py-1.5 rounded bg-neutral-800 hover:bg-neutral-700 disabled:opacity-50 text-neutral-200 border border-neutral-700"
+                    >
+                      Save edits
+                    </button>
+                  )}
+                  {analysisSaving && <span className="text-[11px] text-neutral-500">Saving…</span>}
+                  {analysisSaved && <span className="text-[11px] text-emerald-400">Saved</span>}
+                </div>
+
+                <textarea
+                  value={analysisDraft}
+                  onChange={(e) => { setAnalysisDraft(e.target.value); setAnalysisDirty(true); setAnalysisSaved(false) }}
+                  placeholder={
+                    analysisGenerating
+                      ? 'Generating…'
+                      : issue.kind === 'feature'
+                        ? "Click \"Generate analysis with Claude\" to get a starter breakdown (goal, acceptance criteria, implementation plan). You can edit it freely before clicking Fix with agent."
+                        : "Click \"Generate analysis with Claude\" to get a starter root-cause + fix-plan breakdown. You can edit it freely before clicking Fix with agent."
+                  }
+                  rows={Math.min(20, Math.max(8, (analysisDraft.match(/\n/g)?.length ?? 4) + 3))}
+                  className="w-full bg-neutral-900 border border-neutral-800 rounded p-3 text-[12.5px] font-mono text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-neutral-600 leading-relaxed"
+                  disabled={analysisGenerating}
+                />
+
+                <div className="flex gap-2 items-start">
+                  <input
+                    type="text"
+                    value={refinementTurn}
+                    onChange={(e) => setRefinementTurn(e.target.value)}
+                    placeholder="Ask Claude to refine: e.g. 'zoom in on the date parser', 'make the plan more conservative'…"
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && refinementTurn.trim() && !analysisGenerating) {
+                        e.preventDefault()
+                        void runGenerateAnalysis(refinementTurn.trim())
+                      }
+                    }}
+                    className="flex-1 bg-neutral-900 border border-neutral-800 rounded px-3 py-1.5 text-xs text-neutral-200 placeholder-neutral-600 focus:outline-none focus:border-neutral-600"
+                    disabled={analysisGenerating}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => runGenerateAnalysis(refinementTurn.trim() || undefined)}
+                    disabled={analysisGenerating || !refinementTurn.trim()}
+                    className="text-xs px-3 py-1.5 rounded border border-neutral-700 bg-neutral-900 hover:bg-neutral-800 disabled:opacity-40 text-neutral-200"
+                  >
+                    Refine
+                  </button>
+                </div>
+
+                {analysisError && (
+                  <div className="text-xs text-red-300 bg-red-900/30 border border-red-700/40 rounded px-3 py-2">
+                    {analysisError}
+                  </div>
+                )}
+                <p className="text-[11px] text-neutral-500">
+                  Analysis runs <code>claude</code> locally — make sure the CLI is installed and authenticated on this machine.
+                  The generated markdown is included in the "Fix with agent" prompt, so refining it here directly improves the fix.
+                </p>
+              </div>
+            </Section>
+
             <Section title="Culprit">
               <div className="text-neutral-400 font-mono text-xs">
                 {issue.culprit ?? 'unknown'}
@@ -668,11 +827,36 @@ function buildFixPrompt(
       ].join('\n')
     : ''
 
+  // v0.8.2: feature requests get a different framing — they're not a bug to
+  // root-cause, they're a scope of work to implement. If the user (or Claude)
+  // has already produced an analysis markdown, embed it verbatim so the agent
+  // doesn't have to re-think the plan from scratch.
+  const isFeature = issue.kind === 'feature'
+  const analysisBlock = issue.analysis
+    ? [
+        '',
+        '=== Curated analysis (use this as your implementation/fix plan) ===',
+        issue.analysis.trim(),
+        '=== End analysis ===',
+        '',
+      ].join('\n')
+    : ''
+
+  const opening = isFeature
+    ? `A new feature request was filed against the "${stackName}" stack (source env: ${sourceEnvName}).`
+    : `A new error was reported from the "${stackName}" stack (source env: ${sourceEnvName}).`
+
+  const job = isFeature
+    ? `Your job: implement the feature end-to-end following the curated analysis above (or, if missing, the title + description). Write the code, run any relevant type-check / test / lint the repo uses, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT ship half-implemented scaffolding or placeholder UI. If the scope is unclear, explain what specifically you'd need decided and stop without committing.`
+    : `Your job: investigate the root cause, apply a minimal correct fix, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT commit placeholder or debug-only changes. If you cannot safely determine a fix without more info, explain exactly what you'd need and stop without committing.`
+
   const lines = [
-    `A new error was reported from the "${stackName}" stack (source env: ${sourceEnvName}).`,
+    opening,
     '',
     `Issue id: ${issue.id}`,
+    `Type: ${issue.kind}`,
     `Title: ${issue.title}`,
+    issue.description ? `Description: ${issue.description}` : '',
     issue.culprit ? `Culprit: ${issue.culprit}` : '',
     event?.exception
       ? `Exception: ${event.exception.type}${event.exception.value ? ' — ' + event.exception.value : ''}`
@@ -682,8 +866,8 @@ function buildFixPrompt(
     browserLine ? `Browser / UA: ${browserLine}` : '',
     fullStack ? `\nStack trace (top ${Math.min(frames.length, 15)} frames):\n${fullStack}` : '',
     crumbs ? `\nLast user actions before the crash:\n${crumbs}` : '',
-    '',
-    `Your job: investigate the root cause, apply a minimal correct fix, and commit with a clear message (include "alby-issue ${issue.id}" in the body for traceability), then push to origin. Do NOT commit placeholder or debug-only changes. If you cannot safely determine a fix without more info, explain exactly what you'd need and stop without committing.`,
+    analysisBlock,
+    job,
     resolveBlock,
   ]
   return lines.filter((l) => l !== '').join('\n')

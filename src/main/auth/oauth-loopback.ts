@@ -145,6 +145,16 @@ function waitForCallback(server: Server, timeoutMs: number): Promise<string> {
         res.setHeader('Access-Control-Allow-Origin', origin)
         res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS')
         res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
+        // Private Network Access (Chrome ≥ 104 / Safari recent). When an HTTPS
+        // page (alby.sh) talks to a loopback server on a less-public address
+        // (127.0.0.1), the browser adds the `Access-Control-Request-Private-
+        // Network: true` header to the preflight and expects a matching
+        // `Access-Control-Allow-Private-Network: true` on the response — or it
+        // silently blocks the POST. Without this, the /desktop-callback page
+        // on alby.sh shows "Could not reach the desktop app…" even though the
+        // loopback is listening. See:
+        // https://developer.chrome.com/blog/private-network-access-preflight
+        res.setHeader('Access-Control-Allow-Private-Network', 'true')
       }
 
       if (req.method === 'OPTIONS') {

@@ -25,14 +25,21 @@ export class IssuesRepo {
     this.db
       .prepare(
         `INSERT INTO issues
-           (id, app_id, fingerprint, title, culprit, status, resolved_in_release_id,
+           (id, app_id, fingerprint, title, culprit, description, kind, analysis,
+            source, created_by_user_id, status, resolved_in_release_id,
             level, occurrences_count, first_seen_at, last_seen_at, created_at, updated_at)
          VALUES
-           (@id, @app_id, @fingerprint, @title, @culprit, @status, @resolved_in_release_id,
+           (@id, @app_id, @fingerprint, @title, @culprit, @description, @kind, @analysis,
+            @source, @created_by_user_id, @status, @resolved_in_release_id,
             @level, @occurrences_count, @first_seen_at, @last_seen_at, @created_at, @updated_at)
          ON CONFLICT(id) DO UPDATE SET
            title = excluded.title,
            culprit = excluded.culprit,
+           description = excluded.description,
+           kind = excluded.kind,
+           analysis = excluded.analysis,
+           source = excluded.source,
+           created_by_user_id = excluded.created_by_user_id,
            status = excluded.status,
            resolved_in_release_id = excluded.resolved_in_release_id,
            level = excluded.level,
@@ -47,6 +54,11 @@ export class IssuesRepo {
         fingerprint: issue.fingerprint,
         title: issue.title,
         culprit: issue.culprit ?? null,
+        description: issue.description ?? null,
+        kind: issue.kind ?? 'bug',
+        analysis: issue.analysis ?? null,
+        source: issue.source ?? 'sdk',
+        created_by_user_id: issue.created_by_user_id ?? null,
         status: issue.status,
         resolved_in_release_id: issue.resolved_in_release_id ?? null,
         level: issue.level,

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useCreateIssue } from '../../hooks/useIssues'
-import type { IssueLevel, ReportingApp } from '../../../shared/types'
+import type { IssueKind, IssueLevel, ReportingApp } from '../../../shared/types'
 
 interface Props {
   /** Apps the user is allowed to report against. If the list has one
@@ -35,6 +35,7 @@ const LEVELS: Array<{ value: IssueLevel; label: string; hint: string; color: str
  */
 export function ReportIssueDialog({ apps, initialAppId, onClose, onCreated }: Props) {
   const [appId, setAppId] = useState<string>(initialAppId || apps[0]?.id || '')
+  const [kind, setKind] = useState<IssueKind>('bug')
   const [title, setTitle] = useState('')
   const [description, setDescription] = useState('')
   const [level, setLevel] = useState<IssueLevel>('error')
@@ -47,7 +48,10 @@ export function ReportIssueDialog({ apps, initialAppId, onClose, onCreated }: Pr
       {
         title: title.trim(),
         description: description.trim() ? description.trim() : null,
-        level,
+        // Feature requests use 'info' severity unless the user explicitly
+        // picked something else — they're not errors, they're work items.
+        level: kind === 'feature' && level === 'error' ? 'info' : level,
+        kind,
       },
       {
         onSuccess: (issue) => {
@@ -67,10 +71,33 @@ export function ReportIssueDialog({ apps, initialAppId, onClose, onCreated }: Pr
         className="bg-[var(--bg-secondary)] border border-[var(--border-color)] rounded-lg p-6 w-[520px] max-w-[94vw] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="text-lg font-medium mb-1">Report an issue</h2>
-        <p className="text-[12px] text-neutral-500 mb-5">
-          A manual report. Your name is attached so the team knows who to ask if they need more context.
+        <h2 className="text-lg font-medium mb-1">
+          {kind === 'feature' ? 'Request a feature' : 'Report an issue'}
+        </h2>
+        <p className="text-[12px] text-neutral-500 mb-4">
+          {kind === 'feature'
+            ? 'Propose a new implementation. Your name is attached so the team knows who to ask if they need more context.'
+            : 'A manual report. Your name is attached so the team knows who to ask if they need more context.'}
         </p>
+
+        {/* Type switcher — bug vs feature. Changes the dialog framing + the
+            default severity + the AI-analysis sections generated later. */}
+        <div className="flex items-center gap-1 p-0.5 bg-[var(--bg-tertiary)] border border-[var(--border-color)] rounded-md mb-4 w-fit">
+          {(['bug', 'feature'] as const).map((k) => (
+            <button
+              key={k}
+              type="button"
+              onClick={() => setKind(k)}
+              className={`px-3 py-1 text-[12px] font-medium rounded transition-colors ${
+                kind === k
+                  ? 'bg-[var(--bg-secondary)] text-[var(--text-primary)] shadow-sm'
+                  : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'
+              }`}
+            >
+              {k === 'bug' ? '🐞 Bug' : '✨ Feature'}
+            </button>
+          ))}
+        </div>
 
         <form onSubmit={handleSubmit} className="space-y-4">
           {/* App picker — only shown when there's more than one available.

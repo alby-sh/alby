@@ -337,6 +337,10 @@ export interface Routine {
   last_run_at: string | null
   last_exit_code: number | null
   sort_order: number
+  /** Per-routine delegation allow-list (numeric user IDs). Null/empty →
+   *  role-based access (requires `manage_routines` capability). Populated →
+   *  those users may start the routine even if their role lacks it. */
+  allowed_user_ids: number[] | null
   created_at: string
 }
 
@@ -347,6 +351,7 @@ export interface CreateRoutineDTO {
   interval_seconds: number | null
   agent_type: RoutineAgentType
   prompt: string
+  allowed_user_ids?: number[] | null
 }
 
 export interface UpdateRoutineDTO {
@@ -356,6 +361,7 @@ export interface UpdateRoutineDTO {
   agent_type?: RoutineAgentType
   prompt?: string
   enabled?: 0 | 1
+  allowed_user_ids?: number[] | null
 }
 
 export interface CustomSSHHost {
@@ -466,6 +472,10 @@ export interface PublicUser {
  *  and the source-filter tabs (All / Auto / Manual) in IssuesListView. */
 export type IssueSource = 'sdk' | 'manual'
 
+/** What the issue is FOR. v0.8.2: users can manually file 'feature' requests
+ *  alongside 'bug' reports. SDK-captured issues are always 'bug'. */
+export type IssueKind = 'bug' | 'feature'
+
 export interface Issue {
   id: string
   app_id: string
@@ -476,12 +486,21 @@ export interface Issue {
    *  "Report issue" form. Null for SDK-captured issues — their body lives
    *  on the latest_event (exception / breadcrumbs / context). */
   description: string | null
+  /** v0.8.2: AI-generated (and/or human-edited) markdown breakdown of the
+   *  issue. Seeded by the "Generate analysis" button (spawns a local claude
+   *  CLI), then optionally refined by the user. Read by the "Fix with agent"
+   *  button as part of the spawned agent's prompt. */
+  analysis: string | null
   status: IssueStatus
   resolved_in_release_id: string | null
   level: IssueLevel
   /** Populated by the backend on every payload; defaults to 'sdk' for
    *  legacy rows so the frontend can rely on it existing. */
   source: IssueSource
+  /** bug | feature. SDK issues are always bugs; only the manual flow can set
+   *  'feature'. Drives the badge colour in IssuesListView and the prompt
+   *  framing in the Fix-with-agent action. */
+  kind: IssueKind
   /** User id of whoever manually reported this issue, null for SDK.
    *  Foreign key to the `users` table in the Laravel backend. */
   created_by_user_id: number | null
@@ -616,6 +635,9 @@ export interface UpdateIssueDTO {
   status?: IssueStatus
   resolved_in_release_id?: string | null
   level?: IssueLevel
+  kind?: IssueKind
+  analysis?: string | null
+  description?: string | null
 }
 
 /** Payload for the "Report issue" form. The backend infers `source='manual'`
@@ -627,6 +649,9 @@ export interface CreateIssueDTO {
   /** Defaults to 'error' on the server if omitted. Kept optional so a
    *  one-field form still works. */
   level?: IssueLevel
+  /** 'bug' (default) or 'feature' — the latter marks the issue as a
+   *  deliberate scope-change request rather than a defect. */
+  kind?: IssueKind
 }
 
 export interface CreateReleaseDTO {

@@ -98,6 +98,28 @@ function buildPerms(role: WorkspaceRole, caps: WorkspaceCapability[], isPersonal
 
 const PERSONAL = buildPerms('owner', PERSONAL_CAPS, true)
 
+/**
+ * Can the current user Start the given manual routine?
+ *
+ *   1. If they have `manage_routines` on the current workspace → yes
+ *      (the normal role-based path: owners/admins/developers).
+ *   2. Otherwise, if the routine has an allow-list and their numeric user
+ *      ID is on it → yes (per-row delegation).
+ *   3. Otherwise → no.
+ *
+ * Pass `null` to default to "can start" — the sidebar doesn't always have
+ * the full Routine hydrated when it first renders the button.
+ */
+export function useCanStartRoutine(routine: { allowed_user_ids?: number[] | null } | null | undefined): boolean {
+  const perms = useWorkspaceRole()
+  const myId = useAuthStore((s) => s.user?.id ?? null)
+  if (!routine) return perms.capabilities.has('manage_routines')
+  if (perms.capabilities.has('manage_routines')) return true
+  const list = routine.allowed_user_ids
+  if (!list || list.length === 0) return false
+  return myId != null && list.includes(myId)
+}
+
 // Resolve the effective permissions for the **current interaction context** —
 // either the active workspace filter when specific, or the role on the owning
 // team of whatever project is currently selected in the sidebar. The

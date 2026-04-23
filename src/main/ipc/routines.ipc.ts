@@ -65,6 +65,7 @@ export function registerRoutinesIPC(db: Database.Database, routineManager: Routi
       agent_type: data.agent_type,
       prompt: data.prompt,
       enabled: true,
+      allowed_user_ids: data.allowed_user_ids ?? null,
     })
     cache(routine)
     return routine

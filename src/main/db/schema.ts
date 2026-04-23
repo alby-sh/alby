@@ -138,6 +138,10 @@ CREATE TABLE IF NOT EXISTS routines (
   last_run_at TEXT,
   last_exit_code INTEGER,
   sort_order INTEGER NOT NULL DEFAULT 0,
+  -- JSON array of user IDs (numeric). NULL / empty → role-based access only.
+  -- When populated, those users may start the routine even if their role
+  -- doesn't grant manage_routines — narrow "delegate this button" flow.
+  allowed_users TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -163,6 +167,14 @@ CREATE TABLE IF NOT EXISTS issues (
   fingerprint TEXT NOT NULL,
   title TEXT NOT NULL,
   culprit TEXT,
+  description TEXT,
+  -- v0.8.2: 'bug' | 'feature'. SDK issues are always 'bug'.
+  kind TEXT NOT NULL DEFAULT 'bug',
+  -- v0.8.2: AI-generated/user-edited markdown analysis. Fed into the
+  -- Fix-with-agent prompt when present.
+  analysis TEXT,
+  source TEXT NOT NULL DEFAULT 'sdk',
+  created_by_user_id INTEGER,
   status TEXT NOT NULL DEFAULT 'open',
   resolved_in_release_id TEXT,
   level TEXT NOT NULL DEFAULT 'error',

@@ -321,6 +321,14 @@ export function IssuesListView({
                     manual
                   </span>
                 )}
+                {i.kind === 'feature' && (
+                  <span
+                    title="Feature request (not a bug)"
+                    className="shrink-0 mt-0.5 text-[9px] uppercase tracking-wider text-violet-300 border border-violet-800/50 rounded px-1 py-[1px]"
+                  >
+                    feature
+                  </span>
+                )}
                 {/* min-w-0 on the flex parent + inner container lets children
                  *  actually shrink below their intrinsic width. break-all is
                  *  the last line of defense against single unbroken tokens

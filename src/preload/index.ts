@@ -371,6 +371,11 @@ const api = {
     listMine: (page?: number, perPage?: number) => ipcRenderer.invoke('issues:list-mine', page, perPage),
     mintResolveUrl: (id: string) => ipcRenderer.invoke('issues:mint-resolve-url', id),
     openCounts: (appIds: string[]) => ipcRenderer.invoke('issues:open-counts', appIds),
+    /** v0.8.2: (re)run the local `claude` CLI to compose a structured
+     *  markdown analysis on the issue. `extraInstruction` is an optional
+     *  turn from the user to steer refinement. */
+    generateAnalysis: (id: string, extraInstruction?: string) =>
+      ipcRenderer.invoke('issues:generate-analysis', id, extraInstruction),
     onLive: (callback: (event: unknown) => void) => {
       const listener = (_: unknown, payload: unknown) => callback(payload)
       ipcRenderer.on('issues:live', listener)

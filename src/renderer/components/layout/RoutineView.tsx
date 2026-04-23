@@ -5,6 +5,7 @@ import { ErrorBoundary } from '../ui/ErrorBoundary'
 import { useStartRoutine, useStopRoutine, useRoutineStatusChange } from '../../hooks/useRoutines'
 import { useAgentStdout } from '../../hooks/useAgents'
 import { useActivityStore } from '../../stores/activity-store'
+import { useCanStartRoutine } from '../../hooks/useWorkspaceRole'
 import type { Routine } from '../../../shared/types'
 
 interface Props {
@@ -52,6 +53,7 @@ export function RoutineView({ routineId }: Props) {
 
   const startRoutine = useStartRoutine()
   const stopRoutine = useStopRoutine()
+  const canStart = useCanStartRoutine(routine ?? null)
 
   // Activity state ('working' | 'idle' | undefined). RemoteAgent emits
   // `agent:activity` with agentId=routineId, and the global listener in
@@ -222,9 +224,12 @@ export function RoutineView({ routineId }: Props) {
             </button>
           ) : (
             <button
-              onClick={() => startRoutine.mutate(routineId)}
-              disabled={startRoutine.isPending}
-              className="px-3 py-1 text-xs rounded bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-50"
+              onClick={() => canStart && startRoutine.mutate(routineId)}
+              disabled={startRoutine.isPending || !canStart}
+              title={canStart
+                ? undefined
+                : "Your workspace role doesn't grant manage_routines and you're not on this routine's delegation allow-list. Ask an owner/admin to add you in the routine's settings."}
+              className="px-3 py-1 text-xs rounded bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {startRoutine.isPending ? 'Starting...' : 'Start'}
             </button>
