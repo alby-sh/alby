@@ -128,12 +128,17 @@ export function RoutineView({ routineId }: Props) {
   }, [])
   useRoutineStatusChange(handleStatus)
 
-  // When the routine is not running anymore, drop its writer + live facts
-  // so stale terminals don't accumulate in memory and the next start shows
-  // a clean slate instead of the previous session's "last line".
+  // When the routine is not running anymore, clear live facts so the status
+  // header doesn't keep showing the previous run's "last line". v0.8.5: we
+  // intentionally do NOT delete the TerminalPanel's writer here — it used
+  // to, which was fine when the form instantly replaced the terminal, but
+  // with the new "keep terminal visible after stop" behaviour the terminal
+  // component stays mounted and its writer must remain alive so a next
+  // Start (same routineId → same agentId → same TerminalPanel) can pipe
+  // fresh stdout into the existing xterm without a re-mount. The writer is
+  // cleaned up naturally by TerminalPanel's unmount effect.
   useEffect(() => {
     if (routine && !routine.tmux_session_name) {
-      writersRef.current.delete(routineId)
       setLastLine('')
       setIterCount(0)
       setLastRunStartedAt(null)
@@ -169,6 +174,28 @@ export function RoutineView({ routineId }: Props) {
   useEffect(() => {
     if (isRunning) setExtraInput('')
   }, [isRunning])
+
+  // v0.8.5: keep the terminal visible after the routine stops so the user can
+  // actually SEE what went wrong when a run dies unexpectedly (bash parse
+  // error, missing CLI, cd failure, etc.). Without this, the UI snaps back to
+  // the launcher form the instant tmux_session_name flips to NULL, and all
+  // output that ever reached the pty is gone — invisible to the user, a pain
+  // to diagnose. We latch `hasRanOnce` true the moment a session starts and
+  // keep it true through stop, so the TerminalPanel stays mounted and xterm's
+  // scrollback survives. Reset on:
+  //   - explicit "Back to launcher" click (user read the output, ready to
+  //     start another run or type new extra context)
+  //   - routineId change (different routine, different context entirely)
+  const [hasRanOnce, setHasRanOnce] = useState(false)
+  useEffect(() => {
+    if (isRunning) setHasRanOnce(true)
+  }, [isRunning])
+  useEffect(() => {
+    // Full reset when navigating to a different routine, otherwise the new
+    // view briefly shows the previous routine's terminal buffer until its
+    // own output arrives.
+    setHasRanOnce(false)
+  }, [routineId])
 
   const handleStart = useCallback(() => {
     if (!canStart || !routine) return
@@ -338,10 +365,42 @@ export function RoutineView({ routineId }: Props) {
       )}
 
       <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-        {isRunning ? (
-          <ErrorBoundary>
-            <TerminalPanel agentId={routineId} registerWriter={registerWriter} kind="routine" />
-          </ErrorBoundary>
+        {/* v0.8.5: TerminalPanel stays mounted whenever the routine is
+         *  running OR has ever had a run in this component session, so the
+         *  user can actually read the output after a stop — essential when a
+         *  run dies from e.g. a bash parse error or missing CLI. The
+         *  launcher form is gated behind an explicit "Back to launcher"
+         *  click so nothing disappears unless the user asks for it. */}
+        {isRunning || hasRanOnce ? (
+          <>
+            <ErrorBoundary>
+              <TerminalPanel agentId={routineId} registerWriter={registerWriter} kind="routine" />
+            </ErrorBoundary>
+            {!isRunning && isManual && (
+              <div className="absolute top-0 left-0 right-0 z-10 flex items-center gap-3 px-3 py-2 bg-neutral-900/95 border-b border-neutral-800 backdrop-blur-sm text-[11px]">
+                <span
+                  className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full border font-medium ${
+                    routine.last_exit_code === 0
+                      ? 'text-emerald-300 bg-emerald-500/10 border-emerald-500/25'
+                      : 'text-amber-300 bg-amber-500/10 border-amber-500/25'
+                  }`}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-current" />
+                  Run finished
+                  {routine.last_exit_code != null && <> · exit {routine.last_exit_code}</>}
+                </span>
+                <span className="text-neutral-400 truncate flex-1 min-w-0">
+                  Output preserved below — scroll to review. Click Start in the header to run again with the same prompt, or Back to launcher to change extra context.
+                </span>
+                <button
+                  onClick={() => setHasRanOnce(false)}
+                  className="shrink-0 px-2 py-1 rounded bg-neutral-800 hover:bg-neutral-700 text-neutral-200 border border-neutral-700"
+                >
+                  Back to launcher
+                </button>
+              </div>
+            )}
+          </>
         ) : isManual ? (
           // Manual / one-time routines: give the user a per-run textarea so
           // they can tack an extra instruction onto the stored prompt before
