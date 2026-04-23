@@ -264,14 +264,43 @@ export const cloudClient = {
   deleteTeam(id: string): Promise<void> {
     return request('DELETE', `/api/teams/${id}`)
   },
-  inviteTeamMember(teamId: string, data: { email?: string; role: 'admin' | 'developer' | 'viewer' | 'analyst' }): Promise<{ invite: unknown; url: string }> {
+  // Invite and role update accept ANY slug (builtin or custom) — the
+  // server validates it exists in the team's `team_roles` table. Typed
+  // as `string` here so the renderer can surface a team-custom slug
+  // without having to cast through a narrower union each time.
+  inviteTeamMember(teamId: string, data: { email?: string; role: string }): Promise<{ invite: unknown; url: string }> {
     return request('POST', `/api/teams/${teamId}/invite`, data)
   },
   removeTeamMember(teamId: string, userId: number): Promise<void> {
     return request('DELETE', `/api/teams/${teamId}/members/${userId}`)
   },
-  updateTeamMemberRole(teamId: string, userId: number, role: 'admin' | 'developer' | 'viewer' | 'analyst'): Promise<void> {
+  updateTeamMemberRole(teamId: string, userId: number, role: string): Promise<void> {
     return request('PUT', `/api/teams/${teamId}/members/${userId}/role`, { role })
+  },
+
+  // ---------- v0.8.1 — Team custom roles ----------
+  /** List the team's full role catalogue (builtins + user-defined).
+   *  The /api/me endpoint already embeds these inline on `teams[i].roles`,
+   *  but this is the authoritative refresh path used after mutations. */
+  listTeamRoles(teamId: string): Promise<Array<{
+    id: string; team_id: string; slug: string; name: string;
+    description: string | null; capabilities: string[]; is_builtin: boolean
+  }>> {
+    return request('GET', `/api/teams/${teamId}/roles`)
+  },
+  createTeamRole(teamId: string, data: { slug: string; name: string; description?: string | null; capabilities: string[] }): Promise<unknown> {
+    return request('POST', `/api/teams/${teamId}/roles`, data)
+  },
+  /** Update a CUSTOM role. Builtins server-side return 422 `builtin` if
+   *  you try to change their capabilities or slug — names can be renamed
+   *  by the team admin via the same endpoint (server decides). */
+  updateTeamRole(teamId: string, roleId: string, data: { name?: string; description?: string | null; capabilities?: string[] }): Promise<unknown> {
+    return request('PATCH', `/api/teams/${teamId}/roles/${roleId}`, data)
+  },
+  /** Delete a custom role. Server reassigns any member currently holding
+   *  it to the `reassignTo` slug (default 'viewer') atomically. */
+  deleteTeamRole(teamId: string, roleId: string, reassignTo = 'viewer'): Promise<void> {
+    return request('DELETE', `/api/teams/${teamId}/roles/${roleId}?reassign_to=${encodeURIComponent(reassignTo)}`)
   },
 
   // ---------- Audit / project history ----------

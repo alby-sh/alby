@@ -1,9 +1,11 @@
-import { useEffect, useState } from 'react'
-import { Close, TrashCan, Copy } from '@carbon/icons-react'
+import { useEffect, useMemo, useState } from 'react'
+import { Add, Close, Edit, TrashCan, Copy } from '@carbon/icons-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useAppStore } from '../../stores/app-store'
-import { useAuthStore } from '../../stores/auth-store'
+import { useAuthStore, type TeamRole } from '../../stores/auth-store'
 import { UserAvatar } from '../ui/UserAvatar'
+import { useTeamRoles, useUpdateMemberRole, useDeleteTeamRole } from '../../hooks/useTeams'
+import { RoleEditorDialog } from '../dialogs/RoleEditorDialog'
 
 interface TeamDetail {
   id: string
@@ -38,10 +40,43 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
 
   const [name, setName] = useState('')
   const [newInviteEmail, setNewInviteEmail] = useState('')
-  const [newInviteRole, setNewInviteRole] = useState<'admin' | 'developer' | 'viewer' | 'analyst'>('developer')
+  const [newInviteRole, setNewInviteRole] = useState<string>('developer')
   const [savedKey, setSavedKey] = useState<string | null>(null)
   const [lastLink, setLastLink] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
+
+  // v0.8.1 — team role catalogue. Builtins are seeded server-side so the
+  // select always has at least the 7 standard options even before the
+  // admin creates any custom roles.
+  const { data: roles = [] } = useTeamRoles(teamId)
+  const updateMemberRole = useUpdateMemberRole(teamId)
+  const deleteRole = useDeleteTeamRole(teamId)
+  const [editingRole, setEditingRole] = useState<TeamRole | null>(null)
+  const [creatingRole, setCreatingRole] = useState(false)
+  // Builtins first (in the standard hierarchy), then customs alphabetically.
+  // Used for both the members-row <select> and the invite-row <select>.
+  const BUILTIN_ORDER = ['owner', 'admin', 'developer', 'viewer', 'analyst', 'issuer']
+  const sortedRoles = useMemo(() => {
+    const rank = (r: TeamRole): number => {
+      if (!r.is_builtin) return 100
+      const i = BUILTIN_ORDER.indexOf(r.slug)
+      return i === -1 ? 50 : i
+    }
+    return [...roles].sort((a, b) => {
+      const d = rank(a) - rank(b)
+      return d !== 0 ? d : a.name.localeCompare(b.name)
+    })
+  }, [roles])
+  // Roles valid for INVITING someone. Owner can't be invited (there's only
+  // one per team, transferred via a separate flow). Everything else is fair
+  // game, including custom roles the team just defined.
+  const invitableRoles = useMemo(() => sortedRoles.filter((r) => r.slug !== 'owner'), [sortedRoles])
+  useEffect(() => {
+    // Keep invite role valid if the admin deleted the one selected.
+    if (!invitableRoles.some((r) => r.slug === newInviteRole) && invitableRoles[0]) {
+      setNewInviteRole(invitableRoles[0].slug)
+    }
+  }, [invitableRoles, newInviteRole])
 
   useEffect(() => { if (team) setName(team.name) }, [team])
 
@@ -59,7 +94,7 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
     },
   })
   const inviteMutation = useMutation({
-    mutationFn: (data: { email?: string; role: 'admin' | 'developer' | 'viewer' | 'analyst' }) =>
+    mutationFn: (data: { email?: string; role: string }) =>
       window.electronAPI.teams.invite(teamId, data) as Promise<{ url: string }>,
     onSuccess: (data) => {
       setLastLink(data.url)
@@ -131,15 +166,49 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
             <Section title="Members" description="Everyone with access to projects owned by this team.">
               <div className="space-y-2">
                 {team.members.length === 0 && <p className="text-[13px] text-neutral-500">No members yet.</p>}
-                {team.members.map((m) => (
-                  <div key={m.id} className="flex items-center gap-3 px-3 h-11 rounded-md bg-neutral-900 border border-neutral-800">
-                    <UserAvatar url={m.avatar_url} name={m.name} size={28} />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-[13px] text-neutral-100 truncate">{m.name}</div>
-                      <div className="text-[11px] text-neutral-500 truncate">{m.email}</div>
-                    </div>
-                    <div className="text-[11px] text-neutral-500 uppercase tracking-wider">{m.pivot.role}</div>
-                    {m.pivot.role !== 'owner' && (
+                {team.members.map((m) => {
+                  const isOwner = m.pivot.role === 'owner'
+                  return (
+                    <div key={m.id} className="flex items-center gap-3 px-3 h-11 rounded-md bg-neutral-900 border border-neutral-800">
+                      <UserAvatar url={m.avatar_url} name={m.name} size={28} />
+                      <div className="flex-1 min-w-0">
+                        <div className="text-[13px] text-neutral-100 truncate">{m.name}</div>
+                        <div className="text-[11px] text-neutral-500 truncate">{m.email}</div>
+                      </div>
+                      {/* Owner stays static — transferring ownership needs a
+                       *  dedicated flow, not an accidental dropdown change.
+                       *  Everyone else gets the role picker in-row. */}
+                      {isOwner ? (
+                        <div className="text-[11px] text-neutral-500 uppercase tracking-wider">owner</div>
+                      ) : sortedRoles.length > 0 ? (
+                        <select
+                          value={m.pivot.role}
+                          onChange={(e) => {
+                            if (e.target.value === m.pivot.role) return
+                            updateMemberRole.mutate({ userId: m.id, role: e.target.value })
+                          }}
+                          disabled={updateMemberRole.isPending}
+                          className="text-[11.5px] bg-neutral-950 border border-neutral-800 rounded px-2 py-1 text-neutral-200 hover:border-neutral-700 focus:outline-none focus:border-neutral-500"
+                          title={sortedRoles.find((r) => r.slug === m.pivot.role)?.description ?? undefined}
+                        >
+                          {!sortedRoles.some((r) => r.slug === m.pivot.role) && (
+                            // Defensive: a legacy role slug we no longer have
+                            // in the catalogue (custom role deleted without
+                            // re-assignment finishing, or backend lagging).
+                            <option value={m.pivot.role}>{m.pivot.role}</option>
+                          )}
+                          {sortedRoles
+                            .filter((r) => r.slug !== 'owner')
+                            .map((r) => (
+                              <option key={r.id} value={r.slug}>
+                                {r.name}
+                                {!r.is_builtin ? ' · custom' : ''}
+                              </option>
+                            ))}
+                        </select>
+                      ) : (
+                        <div className="text-[11px] text-neutral-500 uppercase tracking-wider">{m.pivot.role}</div>
+                      )}
                       <button
                         type="button"
                         onClick={() => { if (confirm(`Remove ${m.name} from ${team.name}?`)) removeMember.mutate(m.id) }}
@@ -148,11 +217,95 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
                       >
                         <TrashCan size={14} />
                       </button>
+                    </div>
+                  )
+                })}
+              </div>
+            </Section>
+
+            <Section
+              title="Roles"
+              description="Built-in roles give common permission presets. Create custom roles to grant exactly the capabilities a team member needs."
+            >
+              <div className="space-y-2">
+                {sortedRoles.map((r) => (
+                  <div key={r.id} className="flex items-start gap-3 px-3 py-2.5 rounded-md bg-neutral-900 border border-neutral-800">
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[13px] text-neutral-100 truncate">{r.name}</span>
+                        <span className="text-[10px] text-neutral-600 font-mono">{r.slug}</span>
+                        {r.is_builtin ? (
+                          <span className="text-[9px] uppercase tracking-wider text-neutral-500 border border-neutral-700 rounded px-1 py-[1px]">
+                            built-in
+                          </span>
+                        ) : (
+                          <span className="text-[9px] uppercase tracking-wider text-blue-300 border border-blue-900/50 rounded px-1 py-[1px]">
+                            custom
+                          </span>
+                        )}
+                      </div>
+                      {r.description && (
+                        <div className="text-[11px] text-neutral-500 truncate mt-0.5">{r.description}</div>
+                      )}
+                      <div className="text-[10.5px] text-neutral-600 mt-1.5 flex flex-wrap gap-1">
+                        {r.capabilities.length === 0 ? (
+                          <span className="italic text-neutral-700">No capabilities</span>
+                        ) : (
+                          r.capabilities.map((c) => (
+                            <span
+                              key={c}
+                              className="border border-neutral-800 rounded px-1 py-[1px] font-mono"
+                            >
+                              {c}
+                            </span>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingRole(r)}
+                      title={r.is_builtin ? 'View / rename built-in role' : 'Edit capabilities'}
+                      className="size-7 flex items-center justify-center rounded text-neutral-400 hover:text-neutral-100 hover:bg-neutral-800"
+                    >
+                      <Edit size={14} />
+                    </button>
+                    {!r.is_builtin && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const ok = confirm(
+                            `Delete role "${r.name}"?\n\nMembers using this role will be moved to "viewer" automatically.`,
+                          )
+                          if (!ok) return
+                          deleteRole.mutate({ roleId: r.id })
+                        }}
+                        className="size-7 flex items-center justify-center rounded text-neutral-500 hover:text-red-400 hover:bg-neutral-800"
+                        title="Delete role"
+                      >
+                        <TrashCan size={14} />
+                      </button>
                     )}
                   </div>
                 ))}
+                <button
+                  type="button"
+                  onClick={() => setCreatingRole(true)}
+                  className="inline-flex items-center gap-1.5 text-[12px] px-3 py-1.5 rounded border border-dashed border-neutral-700 text-neutral-400 hover:text-neutral-100 hover:border-neutral-500"
+                >
+                  <Add size={12} />
+                  New role
+                </button>
               </div>
             </Section>
+
+            {(editingRole || creatingRole) && (
+              <RoleEditorDialog
+                teamId={teamId}
+                existing={editingRole}
+                onClose={() => { setEditingRole(null); setCreatingRole(false) }}
+              />
+            )}
 
             <Section title="Invite a new member" description="Send an invite by email, or generate a shareable link.">
               <div className="space-y-2">
@@ -166,13 +319,15 @@ export function TeamSettingsView({ teamId }: { teamId: string }) {
                   />
                   <select
                     value={newInviteRole}
-                    onChange={(e) => setNewInviteRole(e.target.value as 'admin' | 'developer' | 'viewer' | 'analyst')}
+                    onChange={(e) => setNewInviteRole(e.target.value)}
                     className="h-10 rounded-md border border-neutral-700 bg-neutral-900 px-3 text-[13px] text-neutral-50"
                   >
-                    <option value="developer">Developer</option>
-                    <option value="viewer">Viewer</option>
-                    <option value="analyst">Analyst (reports only)</option>
-                    <option value="admin">Admin</option>
+                    {invitableRoles.map((r) => (
+                      <option key={r.id} value={r.slug}>
+                        {r.name}
+                        {!r.is_builtin ? ' · custom' : ''}
+                      </option>
+                    ))}
                   </select>
                   <button
                     type="button"

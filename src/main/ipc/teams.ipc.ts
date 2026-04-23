@@ -16,7 +16,25 @@ export function registerTeamsIPC(): void {
   ipcMain.handle('teams:create', (_, data: { name: string; avatar_url?: string }) => cloudClient.createTeam(data))
   ipcMain.handle('teams:update', (_, id: string, data: { name?: string; avatar_url?: string | null }) => cloudClient.updateTeam(id, data))
   ipcMain.handle('teams:delete', (_, id: string) => cloudClient.deleteTeam(id))
-  ipcMain.handle('teams:invite', (_, id: string, data: { email?: string; role: 'admin' | 'developer' | 'viewer' | 'analyst' }) => cloudClient.inviteTeamMember(id, data))
+  // invite/update-member-role accept ANY role slug (builtin or team-custom)
+  // from v0.8.1 — the backend validates against the team's roles table.
+  ipcMain.handle('teams:invite', (_, id: string, data: { email?: string; role: string }) => cloudClient.inviteTeamMember(id, data))
   ipcMain.handle('teams:remove-member', (_, id: string, userId: number) => cloudClient.removeTeamMember(id, userId))
-  ipcMain.handle('teams:update-member-role', (_, id: string, userId: number, role: 'admin' | 'developer' | 'viewer' | 'analyst') => cloudClient.updateTeamMemberRole(id, userId, role))
+  ipcMain.handle('teams:update-member-role', (_, id: string, userId: number, role: string) => cloudClient.updateTeamMemberRole(id, userId, role))
+
+  // --- v0.8.1: team custom-role CRUD. The renderer reads the role list
+  // primarily from the inline `teams[i].roles` shipped on /api/me, and
+  // only hits these endpoints on explicit refresh or mutation. ---
+  ipcMain.handle('teams:roles:list', (_, teamId: string) =>
+    guarded(() => cloudClient.listTeamRoles(teamId), [] as unknown[])
+  )
+  ipcMain.handle('teams:roles:create', (_, teamId: string, data: { slug: string; name: string; description?: string | null; capabilities: string[] }) =>
+    cloudClient.createTeamRole(teamId, data)
+  )
+  ipcMain.handle('teams:roles:update', (_, teamId: string, roleId: string, data: { name?: string; description?: string | null; capabilities?: string[] }) =>
+    cloudClient.updateTeamRole(teamId, roleId, data)
+  )
+  ipcMain.handle('teams:roles:delete', (_, teamId: string, roleId: string, reassignTo?: string) =>
+    cloudClient.deleteTeamRole(teamId, roleId, reassignTo)
+  )
 }

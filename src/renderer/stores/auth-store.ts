@@ -7,20 +7,62 @@ export interface AuthUser {
   avatar_url: string | null
 }
 
-// 'issuer' = a minimal role introduced in v0.8.0. An issuer can ONLY submit
-// new issue reports against apps they have access to (via a barebones form)
-// and see the list of reports they've created. They cannot see sessions,
-// environments, routines, settings, or any other user's issues. Useful for
-// giving non-developers (QA, support, ops) a controlled feedback channel
-// into the team's error tracker.
-export type WorkspaceRole = 'owner' | 'admin' | 'developer' | 'viewer' | 'analyst' | 'member' | 'issuer'
+/** Slugs of the 6 built-in roles. Every team gets these seeded on creation
+ *  so the Laravel side can store them in the `team_roles` table alongside
+ *  user-defined roles and resolve `team_members.role` consistently. */
+export type BuiltinRole = 'owner' | 'admin' | 'developer' | 'viewer' | 'analyst' | 'member' | 'issuer'
+
+/** What the effective role on a workspace ultimately is. Historically a
+ *  closed enum of builtins; from v0.8.1 onward it's any slug that exists
+ *  in the owning team's `roles` list — i.e. any builtin OR any custom
+ *  role the team admin defined. Typed as a plain string here so the
+ *  compiler doesn't scream every time we read it, while still letting
+ *  the builtin literals participate in narrowing via BuiltinRole. */
+export type WorkspaceRole = BuiltinRole | (string & {})
+
+/** A capability flag on a team role. Kept as a string union so adding a
+ *  new one is a one-line change propagated through the codebase via
+ *  grep. Stored on team_roles.capabilities as a JSON array. */
+export type WorkspaceCapability =
+  | 'launch_agents'        // spawn terminal/agent sessions, write to stdin
+  | 'edit_projects'        // create / rename / delete projects, envs, stacks, tasks
+  | 'see_reports'          // open activity reports, analytics
+  | 'manage_workspace'     // edit team + members + billing; invite/remove
+  | 'report_issue'         // POST /api/apps/{id}/issues (manual issue submit)
+  | 'view_issues'          // see the Issues tab at all — separate from report
+  | 'resolve_issues'       // change issue status, delete resolved
+  | 'run_deploy'           // press Deploy now on a deploy-role env
+  | 'manage_routines'      // create / edit / start / stop routines
+  | 'manage_roles'         // CRUD on team_roles (custom roles)
+
+/** Full shape of a team role — either a builtin or a custom one. The
+ *  only field that varies across teams is `capabilities` (custom roles)
+ *  and `name` (team admin can label "Frontend Lead" however they like).
+ *  `is_builtin=true` means capabilities are hardcoded server-side and
+ *  cannot be edited; the slug is one of BuiltinRole. */
+export interface TeamRole {
+  id: string
+  team_id: string
+  slug: WorkspaceRole
+  name: string
+  description: string | null
+  capabilities: WorkspaceCapability[]
+  is_builtin: boolean
+}
 
 export interface AuthTeam {
   id: string
   name: string
   slug: string
   avatar_url: string | null
+  /** The effective role slug of the current user on this team. References
+   *  a `TeamRole.slug` in `roles` below. */
   role: WorkspaceRole
+  /** All roles defined on this team — builtins + customs. Populated by
+   *  /api/me on login and refreshed on `entity.changed` type='team_role'.
+   *  Used by useWorkspaceRole to look up the current user's capabilities
+   *  without an extra fetch every time the dependency list changes. */
+  roles?: TeamRole[]
 }
 
 // 'all' = aggregate every workspace the user has access to.

@@ -300,10 +300,18 @@ const api = {
     create: (data: { name: string; avatar_url?: string }) => ipcRenderer.invoke('teams:create', data),
     update: (id: string, data: { name?: string; avatar_url?: string | null }) => ipcRenderer.invoke('teams:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('teams:delete', id),
-    invite: (id: string, data: { email?: string; role: 'admin' | 'developer' | 'viewer' | 'analyst' }) => ipcRenderer.invoke('teams:invite', id, data),
+    invite: (id: string, data: { email?: string; role: string }) => ipcRenderer.invoke('teams:invite', id, data),
     removeMember: (id: string, userId: number) => ipcRenderer.invoke('teams:remove-member', id, userId),
-    updateMemberRole: (id: string, userId: number, role: 'admin' | 'developer' | 'viewer' | 'analyst') =>
-      ipcRenderer.invoke('teams:update-member-role', id, userId, role)
+    updateMemberRole: (id: string, userId: number, role: string) =>
+      ipcRenderer.invoke('teams:update-member-role', id, userId, role),
+    // v0.8.1 — custom team roles.
+    listRoles: (teamId: string) => ipcRenderer.invoke('teams:roles:list', teamId),
+    createRole: (teamId: string, data: { slug: string; name: string; description?: string | null; capabilities: string[] }) =>
+      ipcRenderer.invoke('teams:roles:create', teamId, data),
+    updateRole: (teamId: string, roleId: string, data: { name?: string; description?: string | null; capabilities?: string[] }) =>
+      ipcRenderer.invoke('teams:roles:update', teamId, roleId, data),
+    deleteRole: (teamId: string, roleId: string, reassignTo?: string) =>
+      ipcRenderer.invoke('teams:roles:delete', teamId, roleId, reassignTo),
   },
   errors: {
     report: (payload: {
