@@ -111,6 +111,11 @@ export class RemoteAgent extends EventEmitter {
           const text = data.toString('utf-8')
           // Try detecting from passthrough OSC sequences
           this.detectActivityFromOutput(text)
+          // Fan out the raw chunk to subscribers in main (e.g.
+          // PortForwarder via AgentManager). Listeners run before the IPC
+          // send so any side-effect they trigger (opening a tunnel) is in
+          // flight by the time the renderer paints the same line.
+          this.emit('stdout-chunk', text)
           this.win.webContents.send('agent:stdout', {
             agentId: this.agentId,
             data: text

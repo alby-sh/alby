@@ -3,7 +3,7 @@ import type Database from 'better-sqlite3'
 import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
 import { IssuesRepo } from '../db/issues.repo'
-import type { Issue, IssueEvent, IssueListFilters, UpdateIssueDTO } from '../../shared/types'
+import type { Issue, IssueEvent, IssueListFilters, UpdateIssueDTO, CreateIssueDTO } from '../../shared/types'
 
 export function registerIssuesIPC(db: Database.Database): void {
   const repo = new IssuesRepo(db)
@@ -54,6 +54,23 @@ export function registerIssuesIPC(db: Database.Database): void {
     const i = await cloudClient.updateIssue(id, data)
     mirror(() => repo.upsertFromCloud(i))
     return i
+  })
+
+  ipcMain.handle('issues:create', async (_, appId: string, data: CreateIssueDTO) => {
+    // Intentionally NO `safe` wrapper: the caller needs to see the server
+    // error if the submit fails (validation, auth, 404 on old backend) so
+    // the dialog can surface a useful message. Mirror the new row into
+    // local cache so the issuer sees it instantly in "My reports".
+    const i = await cloudClient.createIssue(appId, data)
+    mirror(() => repo.upsertFromCloud(i))
+    return i
+  })
+
+  ipcMain.handle('issues:list-mine', async (_, page = 1, perPage = 50) => {
+    return safe(
+      () => cloudClient.listMyIssues(page, perPage),
+      { data: [], current_page: 1, last_page: 1, total: 0 }
+    )
   })
 
   ipcMain.handle('issues:delete', async (_, id: string) => {

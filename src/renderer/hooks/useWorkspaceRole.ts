@@ -10,6 +10,15 @@ interface WorkspacePermissions {
   canEdit: boolean
   canSeeReports: boolean
   canManageWorkspace: boolean
+  /** True when the user is allowed to submit a new manual issue via the
+   *  "Report issue" form. Everyone except pure 'analyst' gets this today;
+   *  'issuer' exists specifically to grant ONLY this capability. */
+  canReportIssue: boolean
+  /** True when the effective role is the restricted 'issuer' and the whole
+   *  app should render the minimal IssuerShell instead of the normal
+   *  sidebar + main area. Pre-computed here so consumers don't duplicate
+   *  the check. */
+  isIssuerOnly: boolean
 }
 
 const PERSONAL: WorkspacePermissions = {
@@ -19,6 +28,8 @@ const PERSONAL: WorkspacePermissions = {
   canEdit: true,
   canSeeReports: true,
   canManageWorkspace: true,
+  canReportIssue: true,
+  isIssuerOnly: false,
 }
 
 // Resolve the effective role for the **current interaction context** — either
@@ -54,14 +65,20 @@ export function useWorkspaceRole(): WorkspacePermissions {
     const isDeveloper = role === 'developer' || role === 'member'
     const isViewer = role === 'viewer'
     const isAnalyst = role === 'analyst'
+    const isIssuer = role === 'issuer'
 
     return {
       role,
       isPersonal: false,
+      // Issuer is deliberately locked out of EVERY capability except the
+      // one below. Any new capability added in the future must default to
+      // false for issuer — the role is "can report, nothing else".
       canLaunchAgents: isOwner || isAdmin || isDeveloper,
       canEdit: isOwner || isAdmin || isDeveloper,
       canSeeReports: isOwner || isAdmin || isViewer || isAnalyst,
       canManageWorkspace: isOwner || isAdmin,
+      canReportIssue: isOwner || isAdmin || isDeveloper || isViewer || isIssuer,
+      isIssuerOnly: isIssuer,
     }
   }, [workspace, teams, selectedProjectId, projects])
 }

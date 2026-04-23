@@ -296,7 +296,7 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
   // sticks across devices / restarts.
   ipcMain.handle(
     'agents:update',
-    async (_, agentId: string, data: { tab_name?: string }) => {
+    async (event, agentId: string, data: { tab_name?: string }) => {
       const trimmed = data.tab_name?.trim()
       if (trimmed && trimmed.length > 0) {
         repo.updateTabName(agentId, trimmed)
@@ -304,6 +304,14 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
       await cloudWrite(
         cloudClient.updateAgent(agentId, { tab_name: trimmed || undefined }),
       )
+      // The rename to a `▶ ` prefix is the LaunchPlayButton's signal that
+      // this terminal is the env's launch runner. Kick off port-forwarding
+      // *before* the renderer's setTimeout fires writeStdin(launch_command)
+      // so the PortForwarder sees the very first stdout chunks.
+      if (trimmed && trimmed.startsWith('▶ ')) {
+        const win = BrowserWindow.fromWebContents(event.sender)
+        if (win) agentManager.markAsLaunchAgent(agentId, win)
+      }
       return repo.get(agentId) ?? null
     },
   )

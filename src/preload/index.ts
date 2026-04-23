@@ -359,6 +359,8 @@ const api = {
       ipcRenderer.invoke('issue-events:list', id, page, perPage),
     update: (id: string, data: unknown) => ipcRenderer.invoke('issues:update', id, data),
     delete: (id: string) => ipcRenderer.invoke('issues:delete', id),
+    create: (appId: string, data: unknown) => ipcRenderer.invoke('issues:create', appId, data),
+    listMine: (page?: number, perPage?: number) => ipcRenderer.invoke('issues:list-mine', page, perPage),
     mintResolveUrl: (id: string) => ipcRenderer.invoke('issues:mint-resolve-url', id),
     openCounts: (appIds: string[]) => ipcRenderer.invoke('issues:open-counts', appIds),
     onLive: (callback: (event: unknown) => void) => {
@@ -385,6 +387,64 @@ const api = {
      *  check on localhost dev origins doesn't block Reverb channel auth. */
     authorize: (token: string, socketId: string, channelName: string) =>
       ipcRenderer.invoke('broadcast:authorize', { token, socketId, channelName }),
+  },
+  ports: {
+    /** Return forwarded ports for a single launch agent. Empty array for
+     *  non-launch agents and agents whose tunnels were torn down. */
+    listByAgent: (agentId: string) => ipcRenderer.invoke('ports:list-by-agent', agentId),
+    /** Aggregate of every forwarded port in an env (across all of its
+     *  launch agents). Used by the env-level UI badge. */
+    listByEnv: (envId: string) => ipcRenderer.invoke('ports:list-by-env', envId),
+    /** Push: one entry per local server bound. Comes once per port; the
+     *  forwarder also auto-opens the URL in the user's default browser. */
+    onPortOpened: (
+      callback: (port: {
+        agent_id: string
+        environment_id: string
+        remote_port: number
+        local_port: number
+        opened_at: string
+      }) => void,
+    ) => {
+      const listener = (_: unknown, payload: {
+        agent_id: string
+        environment_id: string
+        remote_port: number
+        local_port: number
+        opened_at: string
+      }) => callback(payload)
+      ipcRenderer.on('ports:port-opened', listener)
+      return () => { ipcRenderer.removeListener('ports:port-opened', listener) }
+    },
+    /** Push: full snapshot of an agent's currently-active ports. Fires on
+     *  every open + on dispose (with an empty `ports` array). */
+    onChange: (
+      callback: (data: {
+        agentId: string
+        environmentId: string | null
+        ports: Array<{
+          agent_id: string
+          environment_id: string
+          remote_port: number
+          local_port: number
+          opened_at: string
+        }>
+      }) => void,
+    ) => {
+      const listener = (_: unknown, payload: {
+        agentId: string
+        environmentId: string | null
+        ports: Array<{
+          agent_id: string
+          environment_id: string
+          remote_port: number
+          local_port: number
+          opened_at: string
+        }>
+      }) => callback(payload)
+      ipcRenderer.on('ports:change', listener)
+      return () => { ipcRenderer.removeListener('ports:change', listener) }
+    },
   },
   notificationSubs: {
     list: (appId: string) => ipcRenderer.invoke('notification-subs:list', appId),

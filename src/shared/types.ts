@@ -212,6 +212,24 @@ export interface SSHHost {
   isCustom: boolean
 }
 
+/** A port that the user's launch_command opened on the remote server, which
+ *  Alby has tunneled to a port on the local machine via SSH local-forward.
+ *
+ *  Lifecycle:
+ *   - Created when the launch agent's stdout matches a `http://localhost:N`
+ *     URL pattern (no polling — see main/ssh/port-detector.ts).
+ *   - Local port equals `remote_port` when free; falls back to a random
+ *     available port otherwise. The renderer should always show `local_port`
+ *     to the user, never assume parity with `remote_port`.
+ *   - Disposed when the spawning launch agent exits / is killed / SSH dies. */
+export interface ForwardedPort {
+  agent_id: string
+  environment_id: string
+  remote_port: number
+  local_port: number
+  opened_at: string
+}
+
 export interface CreateProjectDTO {
   name: string
   execution_mode?: 'remote' | 'local'
@@ -434,15 +452,42 @@ export interface ReportingApp {
   dsn?: string
 }
 
+/** A "reporter-facing" user shape — only fields the UI needs to render an
+ *  avatar + name + email. Keep this narrow: the issuer role must not be
+ *  able to learn about other users' teams / tokens / projects through it. */
+export interface PublicUser {
+  id: number
+  name: string
+  email: string
+  avatar_url: string | null
+}
+
+/** Where an issue was born. Drives the "Reported by" panel in IssueDetailView
+ *  and the source-filter tabs (All / Auto / Manual) in IssuesListView. */
+export type IssueSource = 'sdk' | 'manual'
+
 export interface Issue {
   id: string
   app_id: string
   fingerprint: string
   title: string
   culprit: string | null
+  /** Manual issues carry free-form prose the reporter typed into the
+   *  "Report issue" form. Null for SDK-captured issues — their body lives
+   *  on the latest_event (exception / breadcrumbs / context). */
+  description: string | null
   status: IssueStatus
   resolved_in_release_id: string | null
   level: IssueLevel
+  /** Populated by the backend on every payload; defaults to 'sdk' for
+   *  legacy rows so the frontend can rely on it existing. */
+  source: IssueSource
+  /** User id of whoever manually reported this issue, null for SDK.
+   *  Foreign key to the `users` table in the Laravel backend. */
+  created_by_user_id: number | null
+  /** Eager-loaded when the backend knows it and the caller is authorised
+   *  to see it (not for issuer role viewing someone else's report). */
+  creator: PublicUser | null
   occurrences_count: number
   first_seen_at: string | null
   last_seen_at: string | null
@@ -481,6 +526,18 @@ export interface IssueEvent {
   }> | null
   contexts: Record<string, unknown> | null
   tags: Record<string, string> | null
+  /** IP of the remote client that sent this event to the ingest endpoint.
+   *  Populated by the Laravel controller from `request()->ip()`. Null for
+   *  rows created before v0.8.0 and for issues whose source is 'manual'. */
+  ip: string | null
+  /** Raw `User-Agent` header from the ingest request. The UI parses this
+   *  into a friendly "Chrome 124 on macOS" label via UserAgentLabel. */
+  user_agent: string | null
+  /** Identifying info about the END user of the monitored app — i.e. the
+   *  person whose browser / app raised the error. Set by the SDK caller
+   *  via `Alby.setUser({ id, email, username })`. Only `email` is strongly
+   *  relied on by the UI today; id / username are opportunistic. */
+  user_context: { id?: string | number; email?: string; username?: string } | null
   received_at: string
   occurred_at: string | null
 }
@@ -545,6 +602,9 @@ export interface UpdateAppDTO {
 export interface IssueListFilters {
   status?: IssueStatus | IssueStatus[] | 'all'
   level?: IssueLevel | IssueLevel[]
+  /** 'sdk' | 'manual' | 'all' (default 'all'). Drives the source tabs in
+   *  IssuesListView. The backend treats missing / 'all' identically. */
+  source?: IssueSource | 'all'
   q?: string
   sort?: 'last_seen_at' | 'first_seen_at' | 'occurrences_count'
   dir?: 'asc' | 'desc'
@@ -555,6 +615,17 @@ export interface IssueListFilters {
 export interface UpdateIssueDTO {
   status?: IssueStatus
   resolved_in_release_id?: string | null
+  level?: IssueLevel
+}
+
+/** Payload for the "Report issue" form. The backend infers `source='manual'`
+ *  and `created_by_user_id` from the authenticated user — the client only
+ *  sends the human content. */
+export interface CreateIssueDTO {
+  title: string
+  description?: string | null
+  /** Defaults to 'error' on the server if omitted. Kept optional so a
+   *  one-field form still works. */
   level?: IssueLevel
 }
 

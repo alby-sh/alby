@@ -4,8 +4,10 @@ import { Sidebar } from './components/layout/Sidebar'
 import { IconNavSidebar } from './components/layout/IconNavSidebar'
 import { TopBar } from './components/layout/TopBar'
 import { MainArea } from './components/layout/MainArea'
+import { IssuerShell } from './components/layout/IssuerShell'
 import { LoginScreen } from './components/auth/LoginScreen'
 import { ToastStack } from './components/ui/ToastStack'
+import { useWorkspaceRole } from './hooks/useWorkspaceRole'
 import { useAppStore } from './stores/app-store'
 import { useActivityStore } from './stores/activity-store'
 import { useConnectionStore } from './stores/connection-store'
@@ -16,6 +18,7 @@ import { useOnlineBootstrap, useOnlineStore } from './stores/online-store'
 import { useAllProjects } from './hooks/useProjects'
 import { useAgentHeartbeats } from './hooks/useAgentHeartbeats'
 import { useMyNotificationSubs } from './hooks/useIssues'
+import { useForwardedPortsBridge } from './hooks/useForwardedPorts'
 import type { Agent } from '../shared/types'
 
 let _audioCtx: AudioContext | null = null
@@ -111,6 +114,10 @@ export default function App() {
   // — sync-store reads this on every incoming issue event to decide whether
   // to fire a native desktop notification.
   useMyNotificationSubs()
+  // Bridge SSH-port-forwarding events from main → toasts + react-query
+  // cache. The browser auto-open happens in main (shell.openExternal); this
+  // hook is just for the in-app confirmation.
+  useForwardedPortsBridge()
   const online = useOnlineStore((s) => s.online)
   const { data: projects } = useAllProjects()
   useEffect(() => {
@@ -324,6 +331,32 @@ export default function App() {
 
   if (!authUser) {
     return <LoginScreen />
+  }
+
+  return <AuthenticatedApp online={online} showAllProjects={showAllProjects} />
+}
+
+/**
+ * The authenticated-user shell. Factored out so the role-check hook can
+ * live here (its deps — projects / teams — are only meaningful once
+ * auth + bootstrap resolved). Branches between the normal sidebar-plus-
+ * main-area layout and the minimal IssuerShell when the effective role
+ * on the active workspace is 'issuer'.
+ */
+function AuthenticatedApp({ online, showAllProjects }: { online: boolean; showAllProjects: boolean }) {
+  const perms = useWorkspaceRole()
+
+  // Issuer: completely different shell — no sidebar, no main area, just
+  // the "Report issue" form + "My reports" list. Returning early here
+  // avoids mounting expensive child trees the issuer can't see anyway
+  // (terminal panels, env fetches, agent subscriptions).
+  if (perms.isIssuerOnly) {
+    return (
+      <div style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, display: 'flex', flexDirection: 'column' }} className="bg-[var(--bg-primary)]">
+        <IssuerShell />
+        <ToastStack />
+      </div>
+    )
   }
 
   return (

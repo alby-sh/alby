@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type {
   CreateAppDTO,
+  CreateIssueDTO,
   CreateReleaseDTO,
   CreateWebhookDTO,
   Issue,
@@ -196,6 +197,37 @@ export function useUpdateIssue() {
       qc.invalidateQueries({ queryKey: ['issues'] })
       qc.invalidateQueries({ queryKey: ['issues-open-counts'] })
     },
+  })
+}
+
+/** Manual issue creation. Spiritually a sibling of useUpdateIssue — the
+ *  only mutation that can INCREASE open counts on the user's own action.
+ *  After success we invalidate the app's list + the global open-counts so
+ *  the new row pops into view without waiting for a Reverb push. */
+export function useCreateIssue(appId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: CreateIssueDTO) => api().issues.create(appId, data) as Promise<Issue>,
+    onSuccess: (issue) => {
+      qc.invalidateQueries({ queryKey: ['issues', issue.app_id], refetchType: 'active' })
+      qc.invalidateQueries({ queryKey: ['issues-open-counts'], refetchType: 'active' })
+      // The issuer's "My reports" list wants to see it right away.
+      qc.invalidateQueries({ queryKey: ['issues-mine'], refetchType: 'active' })
+    },
+  })
+}
+
+/** Issues the current user filed manually, across every app they can
+ *  see. Used by the IssuerShell + (future) a "My reports" view for
+ *  regular users. Short polling because an issuer filing reports is
+ *  high-intent and they want instant feedback. */
+export function useMyReportedIssues() {
+  return useQuery<Paginated<Issue>>({
+    queryKey: ['issues-mine'],
+    queryFn: () =>
+      (api().issues.listMine() as unknown) as Promise<Paginated<Issue>>,
+    refetchInterval: 20_000,
+    staleTime: 5_000,
   })
 }
 

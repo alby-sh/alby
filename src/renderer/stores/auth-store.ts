@@ -7,7 +7,13 @@ export interface AuthUser {
   avatar_url: string | null
 }
 
-export type WorkspaceRole = 'owner' | 'admin' | 'developer' | 'viewer' | 'analyst' | 'member'
+// 'issuer' = a minimal role introduced in v0.8.0. An issuer can ONLY submit
+// new issue reports against apps they have access to (via a barebones form)
+// and see the list of reports they've created. They cannot see sessions,
+// environments, routines, settings, or any other user's issues. Useful for
+// giving non-developers (QA, support, ops) a controlled feedback channel
+// into the team's error tracker.
+export type WorkspaceRole = 'owner' | 'admin' | 'developer' | 'viewer' | 'analyst' | 'member' | 'issuer'
 
 export interface AuthTeam {
   id: string

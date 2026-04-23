@@ -277,6 +277,14 @@ export function IssueDetailView({ issueId }: { issueId: string }) {
       <div className="flex-1 overflow-y-auto p-6 space-y-6 text-sm text-neutral-200">
         {tab === 'overview' && (
           <>
+            <ReportedBySection issue={issue} event={event} />
+            {issue.description && (
+              <Section title="Description">
+                <div className="text-neutral-300 text-[13px] whitespace-pre-wrap leading-relaxed">
+                  {issue.description}
+                </div>
+              </Section>
+            )}
             <Section title="Culprit">
               <div className="text-neutral-400 font-mono text-xs">
                 {issue.culprit ?? 'unknown'}
@@ -458,6 +466,139 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       {children}
     </div>
   )
+}
+
+/**
+ * The "Reported by" block shown at the top of an issue's overview tab.
+ *   - Manual issues (source='manual'): show the creator's avatar + name +
+ *     email. This is the team member who filed the report via the Report
+ *     issue form. `creator` is null until the backend v0.8.0 patch lands.
+ *   - Auto issues (source='sdk'): show the triggering user's IP, a human
+ *     user-agent label, and — when the SDK caller set `user_context` — the
+ *     end-user's email / id. This is the person whose browser or app
+ *     actually threw the error.
+ *
+ * The whole section no-ops for pre-v0.8.0 issues that have none of
+ * source / ip / user_agent / user_context, so the view degrades cleanly.
+ */
+function ReportedBySection({
+  issue,
+  event,
+}: {
+  issue: Issue
+  event: IssueEvent | null
+}) {
+  const isManual = issue.source === 'manual'
+  const creator = issue.creator
+  const ua = event?.user_agent ?? null
+  const ip = event?.ip ?? null
+  const ctx = event?.user_context ?? null
+
+  // Nothing to show: neither manual nor any SDK attribution fields exist.
+  const hasSdkAttribution = !!(ua || ip || (ctx && (ctx.email || ctx.id || ctx.username)))
+  if (!isManual && !hasSdkAttribution) return null
+
+  return (
+    <Section title="Reported by">
+      {isManual ? (
+        <div className="flex items-center gap-3 p-3 rounded border border-neutral-800 bg-neutral-900/60">
+          {creator ? (
+            <>
+              {creator.avatar_url ? (
+                <img src={creator.avatar_url} alt={creator.name} className="size-8 rounded-full" />
+              ) : (
+                <div className="size-8 rounded-full bg-neutral-800 text-neutral-300 flex items-center justify-center text-[11px] font-semibold">
+                  {creator.name.slice(0, 2).toUpperCase()}
+                </div>
+              )}
+              <div className="min-w-0">
+                <div className="text-[13px] text-neutral-100 truncate">{creator.name}</div>
+                <div className="text-[11px] text-neutral-500 truncate">{creator.email}</div>
+              </div>
+              <span className="ml-auto text-[10px] uppercase tracking-wider text-emerald-300 border border-emerald-800/50 rounded px-1.5 py-0.5">
+                manual
+              </span>
+            </>
+          ) : (
+            <div className="text-[12px] text-neutral-500">A team member filed this manually. (Creator details unavailable.)</div>
+          )}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          {ctx?.email && (
+            <AttributionField label="End-user email" value={ctx.email} mono />
+          )}
+          {ctx?.username && !ctx.email && (
+            <AttributionField label="End-user" value={ctx.username} />
+          )}
+          {ctx?.id && !ctx.email && !ctx.username && (
+            <AttributionField label="End-user id" value={String(ctx.id)} mono />
+          )}
+          {ip && <AttributionField label="IP address" value={ip} mono />}
+          {ua && (
+            <div className="col-span-2">
+              <AttributionField label="Client" value={parseUserAgent(ua)} />
+              <div className="mt-1 text-[10px] text-neutral-600 font-mono truncate" title={ua}>
+                {ua}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Section>
+  )
+}
+
+function AttributionField({
+  label,
+  value,
+  mono,
+}: {
+  label: string
+  value: string
+  mono?: boolean
+}) {
+  return (
+    <div className="rounded border border-neutral-800 bg-neutral-900/60 px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wider text-neutral-500 mb-0.5">{label}</div>
+      <div className={`text-[12px] text-neutral-200 truncate ${mono ? 'font-mono' : ''}`}>{value}</div>
+    </div>
+  )
+}
+
+/**
+ * Fast, heuristic User-Agent parser. Not RFC-accurate — it just covers
+ * the ~95% of real-world UAs we see in issue events: evergreen browsers
+ * + major OSes + the popular mobile webviews. For anything exotic we
+ * fall back to the raw string so the info isn't lost.
+ */
+function parseUserAgent(ua: string): string {
+  const s = ua
+  let browser = 'Unknown'
+  let os = 'Unknown OS'
+
+  if (/Edg\//.test(s)) browser = match(s, /Edg\/([\d.]+)/, 'Edge')
+  else if (/OPR\//.test(s)) browser = match(s, /OPR\/([\d.]+)/, 'Opera')
+  else if (/Firefox\//.test(s)) browser = match(s, /Firefox\/([\d.]+)/, 'Firefox')
+  else if (/Chrome\//.test(s)) browser = match(s, /Chrome\/([\d.]+)/, 'Chrome')
+  else if (/Safari\//.test(s) && /Version\//.test(s)) browser = match(s, /Version\/([\d.]+)/, 'Safari')
+  else if (/curl\//.test(s)) browser = match(s, /curl\/([\d.]+)/, 'curl')
+  else if (/node-fetch/i.test(s)) browser = 'node-fetch'
+  else if (/axios/i.test(s)) browser = 'axios'
+
+  if (/iPhone|iPad|iPod/.test(s)) os = 'iOS'
+  else if (/Android/.test(s)) os = 'Android'
+  else if (/Mac OS X/.test(s)) os = 'macOS'
+  else if (/Windows NT/.test(s)) os = 'Windows'
+  else if (/Linux/.test(s)) os = 'Linux'
+
+  return `${browser} on ${os}`
+}
+function match(s: string, re: RegExp, name: string): string {
+  const m = re.exec(s)
+  if (!m) return name
+  const v = (m[1] ?? '').split('.')[0]
+  return v ? `${name} ${v}` : name
 }
 
 // Builds the single-line prompt passed to the auto-fix agent on spawn. Kept

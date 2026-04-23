@@ -21,6 +21,7 @@ import type {
   IssueEvent,
   IssueListFilters,
   UpdateIssueDTO,
+  CreateIssueDTO,
   CreateAppDTO,
   UpdateAppDTO,
   Release,
@@ -370,6 +371,7 @@ export const cloudClient = {
     if (filters) {
       if (filters.status) qs.set('status', Array.isArray(filters.status) ? filters.status.join(',') : filters.status)
       if (filters.level) qs.set('level', Array.isArray(filters.level) ? filters.level.join(',') : filters.level)
+      if (filters.source && filters.source !== 'all') qs.set('source', filters.source)
       if (filters.q) qs.set('q', filters.q)
       if (filters.sort) qs.set('sort', filters.sort)
       if (filters.dir) qs.set('dir', filters.dir)
@@ -378,6 +380,18 @@ export const cloudClient = {
     }
     const suffix = qs.toString() ? `?${qs}` : ''
     return request('GET', `/api/apps/${appId}/issues${suffix}`)
+  },
+  /** Create a MANUAL issue against an app. The backend stamps
+   *  `source='manual'` and `created_by_user_id=auth()->id()` — we only
+   *  send the human content. Dedup on title+app is the server's job. */
+  createIssue(appId: string, data: CreateIssueDTO): Promise<Issue> {
+    return request('POST', `/api/apps/${appId}/issues`, data)
+  },
+  /** Issues the current user reported manually, across every app they
+   *  can see. Used by the IssuerShell's "My reports" list and any
+   *  "what did I file?" view we add later. */
+  listMyIssues(page = 1, perPage = 50): Promise<{ data: Issue[]; current_page: number; last_page: number; total: number }> {
+    return request('GET', `/api/issues/mine?page=${page}&per_page=${perPage}`)
   },
   getIssue(id: string): Promise<{ issue: Issue; app: Pick<ReportingApp, 'id' | 'name' | 'platform'>; latest_event: IssueEvent | null }> {
     return request('GET', `/api/issues/${id}`)

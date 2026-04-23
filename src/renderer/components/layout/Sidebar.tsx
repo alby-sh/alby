@@ -47,6 +47,7 @@ import { useUnreadStore, type EnvPinKey, type StackPinKey } from '../../stores/u
 import { NewProjectDialog } from '../dialogs/NewProjectDialog'
 import { FaviconOrIdenticon } from '../ui/ProjectIcon'
 import type { Agent, Project, Environment, Stack, Task, Routine } from '../../../shared/types'
+import { LAUNCH_TAB_PREFIX, isLaunchTabName } from '../../../shared/launch-agent'
 
 const ease = 'cubic-bezier(0.25, 1.1, 0.4, 1)'
 
@@ -209,9 +210,9 @@ function ProjectConnectionDot({ environments }: { environments: Environment[] })
 // a clean "background" launch that doesn't pollute the session tree.
 // Only LaunchPlayButton itself reads agents-with-this-prefix, to decide
 // whether to render Play or Stop.
-const LAUNCH_TAB_PREFIX = '▶ '
-const isLaunchAgent = (a: Agent): boolean =>
-  !!a.tab_name?.startsWith(LAUNCH_TAB_PREFIX)
+// Re-exported from shared/launch-agent.ts so the main process and renderer
+// agree on the marker. Don't redeclare the prefix locally.
+const isLaunchAgent = (a: Agent): boolean => isLaunchTabName(a.tab_name)
 
 // Get all agents across all tasks for an environment
 function useEnvAgents(tasks: Task[] | undefined, agentsByTask: Map<string, Agent[]>): Agent[] {

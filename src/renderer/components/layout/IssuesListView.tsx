@@ -1,18 +1,29 @@
 import { useMemo, useState } from 'react'
-import { ChevronLeft, Close, Notification, Settings } from '@carbon/icons-react'
+import { Add, ChevronLeft, Close, Notification, Settings } from '@carbon/icons-react'
 import { useAppStore } from '../../stores/app-store'
 import { useApps, useIssues } from '../../hooks/useIssues'
 import { useEnvironments, useAllProjects } from '../../hooks/useProjects'
 import { useStack } from '../../hooks/useStacks'
-import type { IssueLevel, IssueStatus, Project } from '../../../shared/types'
+import { useWorkspaceRole } from '../../hooks/useWorkspaceRole'
+import type { IssueLevel, IssueSource, IssueStatus, Project } from '../../../shared/types'
 import { IssuesSetupView } from './IssuesSetupView'
 import { AlertsPanel } from './AlertsPanel'
+import { ReportIssueDialog } from '../dialogs/ReportIssueDialog'
 
 const STATUS_OPTIONS: { value: IssueStatus | 'all'; label: string }[] = [
   { value: 'open', label: 'Open' },
   { value: 'resolved', label: 'Resolved' },
   { value: 'ignored', label: 'Ignored' },
   { value: 'all', label: 'All' },
+]
+
+/** Source filter tabs. "All" is the default so legacy behaviour (every
+ *  issue visible) is preserved, and so a pre-v0.8.0 backend that doesn't
+ *  know about `source` still shows issues on every tab. */
+const SOURCE_OPTIONS: { value: IssueSource | 'all'; label: string; hint: string }[] = [
+  { value: 'all',    label: 'All',     hint: 'Every issue, regardless of source' },
+  { value: 'sdk',    label: 'Auto',    hint: 'Captured automatically by the SDK (with IP + user-agent + user email if available)' },
+  { value: 'manual', label: 'Manual',  hint: 'Filed by a human via Report issue' },
 ]
 
 const LEVEL_COLOR: Record<IssueLevel, string> = {
@@ -66,10 +77,15 @@ export function IssuesListView({
   const currentAppId = selectedAppId ?? apps[0]?.id ?? null
 
   const [status, setStatus] = useState<IssueStatus | 'all'>('open')
+  const [source, setSource] = useState<IssueSource | 'all'>('all')
   const [query, setQuery] = useState('')
+  const [reportDialogOpen, setReportDialogOpen] = useState(false)
+
+  const perms = useWorkspaceRole()
 
   const { data: page, isLoading } = useIssues(currentAppId, {
     status,
+    source: source === 'all' ? undefined : source,
     q: query || undefined,
     sort: 'last_seen_at',
     dir: 'desc',
@@ -174,6 +190,16 @@ export function IssuesListView({
         )}
         <span className="text-xs text-neutral-500">· {filteredByAppName}</span>
         <div className="ml-auto flex items-center gap-2">
+          {perms.canReportIssue && apps.length > 0 && (
+            <button
+              onClick={() => setReportDialogOpen(true)}
+              title="File a manual issue against this app — your name is attached so the team knows who to ask."
+              className="inline-flex items-center gap-1 text-xs px-3 py-1 rounded border border-emerald-700/50 bg-emerald-900/30 hover:bg-emerald-900/50 text-emerald-200"
+            >
+              <Add size={12} />
+              Report issue
+            </button>
+          )}
           {project && currentAppId && (
             <button
               onClick={() => setManageAlertsOpen(true)}
@@ -194,6 +220,15 @@ export function IssuesListView({
           </button>
         </div>
       </div>
+
+      {reportDialogOpen && (
+        <ReportIssueDialog
+          apps={apps}
+          initialAppId={currentAppId}
+          onClose={() => setReportDialogOpen(false)}
+          onCreated={(id) => openIssueDetail(id)}
+        />
+      )}
 
       {manageAlertsOpen && project && currentAppId && (
         <ManageAlertsDialog
@@ -233,6 +268,22 @@ export function IssuesListView({
             </button>
           ))}
         </div>
+        <div className="flex items-center gap-1 rounded-md bg-neutral-900 p-0.5">
+          {SOURCE_OPTIONS.map((opt) => (
+            <button
+              key={opt.value}
+              onClick={() => setSource(opt.value)}
+              title={opt.hint}
+              className={`text-xs px-2 py-1 rounded ${
+                source === opt.value
+                  ? 'bg-neutral-700 text-white'
+                  : 'text-neutral-400 hover:text-neutral-200'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -262,6 +313,14 @@ export function IssuesListView({
                 <span className={`text-[10px] font-semibold uppercase tracking-wider ${LEVEL_COLOR[i.level]} mt-0.5 w-14 shrink-0`}>
                   {i.level}
                 </span>
+                {i.source === 'manual' && (
+                  <span
+                    title="Manually reported via the Report issue form"
+                    className="shrink-0 mt-0.5 text-[9px] uppercase tracking-wider text-emerald-300 border border-emerald-800/50 rounded px-1 py-[1px]"
+                  >
+                    manual
+                  </span>
+                )}
                 {/* min-w-0 on the flex parent + inner container lets children
                  *  actually shrink below their intrinsic width. break-all is
                  *  the last line of defense against single unbroken tokens

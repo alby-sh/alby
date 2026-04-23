@@ -7,9 +7,12 @@ import { ConnectionPool } from '../ssh/connection-pool'
 import { RemoteAgent } from './remote-agent'
 import { LocalAgent } from './local-agent'
 import { ChatAgent } from './chat-agent'
+import { PortForwarder } from '../ssh/port-forwarder'
+import { detectPortsInChunk } from '../ssh/port-detector'
 import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
-import type { Agent, Task, Environment, Project } from '../../shared/types'
+import { isLaunchTabName } from '../../shared/launch-agent'
+import type { Agent, Task, Environment, Project, ForwardedPort } from '../../shared/types'
 
 interface RunningAgent {
   agent: Agent
@@ -54,6 +57,22 @@ export class AgentManager {
    *   - exponential retry on network errors (1s → 2s → 4s → … cap 60s)
    */
   private chatCloudBuffers: Map<string, ChatCloudBuffer> = new Map()
+  /**
+   * Active SSH local-port-forwards, keyed by agentId. Only populated for
+   * launch agents (terminals running an env's `launch_command`, recognised
+   * by a `▶ ` tab_name prefix — see shared/launch-agent.ts).
+   *
+   * Lifecycle:
+   *  - Created lazily by `attachPortForwarder` when we see a launch agent
+   *    spawn or reattach. The forwarder subscribes to the runner's
+   *    `stdout-chunk` event and binds a local port whenever the launch
+   *    process prints an `http://localhost:N` URL.
+   *  - Disposed by `disposePortForwarder` on the agent's exit/kill — closes
+   *    every local server, so http://localhost:N goes back to refusing
+   *    connections (matching the user's expectation that "stop" tears
+   *    down the whole experience, not just the remote process).
+   */
+  private portForwarders: Map<string, PortForwarder> = new Map()
 
   constructor(
     private db: Database.Database,
@@ -81,6 +100,114 @@ export class AgentManager {
         entry.runner.reconnect(newClient)
       }
     }
+  }
+
+  /* =================== Port forwarding (launch agents) =================== */
+
+  /** Wire a fresh PortForwarder onto a launch agent's stdout stream. The
+   *  forwarder owns the per-port net.Server instances; this method just
+   *  bridges three things together:
+   *    1. RemoteAgent's `stdout-chunk` event → port-detector regex.
+   *    2. Detected ports → forwarder.ensurePort (creates SSH tunnel).
+   *    3. Forwarder's `change` / `port-opened` events → renderer IPC.
+   *
+   *  Idempotent: a second call for an agent that already has a forwarder
+   *  is a no-op. The renderer's `agents:update` handler invokes this
+   *  whenever the user renames a tab to start with `▶ ` so the timing
+   *  matches the LaunchPlayButton flow (spawn → rename → writeStdin). */
+  private attachPortForwarder(
+    agent: Agent,
+    runner: RemoteAgent,
+    env: Environment,
+    win: BrowserWindow,
+  ): void {
+    if (this.portForwarders.has(agent.id)) return
+
+    const forwarder = new PortForwarder(
+      agent.id,
+      env.id,
+      // Closure over the connection pool — when SSH reconnects after a
+      // network drop, the pool hands out a new ssh2 Client and we want
+      // every subsequent forwardOut to use the fresh one. Storing the
+      // current client by reference would silently break tunnels after
+      // any reconnect.
+      () => this.connectionPool.get(env.id),
+      (port: ForwardedPort) => {
+        // Renderer pushes a toast and the local URL is auto-opened by
+        // the forwarder itself via shell.openExternal.
+        try { win.webContents.send('ports:port-opened', port) } catch { /* ignore */ }
+      },
+    )
+    forwarder.on('change', (ports: ForwardedPort[]) => {
+      try {
+        win.webContents.send('ports:change', {
+          agentId: agent.id,
+          environmentId: env.id,
+          ports,
+        })
+      } catch { /* ignore */ }
+    })
+
+    runner.on('stdout-chunk', (text: string) => {
+      if (forwarder.isDisposed()) return
+      const ports = detectPortsInChunk(text)
+      if (ports.length === 0) return
+      for (const p of ports) {
+        forwarder.ensurePort(p).catch((err) => {
+          console.warn(`[AgentManager] ensurePort(${p}) failed:`, (err as Error).message)
+        })
+      }
+    })
+
+    this.portForwarders.set(agent.id, forwarder)
+    console.log(`[AgentManager] PortForwarder armed for launch agent ${agent.id} (${agent.tab_name})`)
+  }
+
+  private disposePortForwarder(agentId: string, win?: BrowserWindow): void {
+    const forwarder = this.portForwarders.get(agentId)
+    if (!forwarder) return
+    forwarder.dispose()
+    this.portForwarders.delete(agentId)
+    // Best-effort renderer notification so the UI clears any "X ports
+    // forwarded" indicator even before the agent's own status-change
+    // event arrives. envId would be nice but the forwarder's already
+    // gone; the renderer can drop the entry by agentId alone.
+    if (win) {
+      try { win.webContents.send('ports:change', { agentId, environmentId: null, ports: [] }) } catch { /* ignore */ }
+    }
+  }
+
+  /** Public: called from `agents:update` IPC right after the renderer
+   *  renames a freshly-spawned terminal to `▶ <command>`. The rename is
+   *  the LaunchPlayButton's signal that this terminal is the env's
+   *  launch runner — port forwarding kicks in here.
+   *
+   *  Local agents are skipped: the launch_command runs on the user's own
+   *  machine, so its localhost is already the user's localhost. No tunnel
+   *  needed. */
+  markAsLaunchAgent(agentId: string, win: BrowserWindow): void {
+    const entry = this.running.get(agentId)
+    if (!entry) return
+    if (!(entry.runner instanceof RemoteAgent)) return
+    const env = this.projectsRepo.getTaskWithEnvironment(entry.agent.task_id)?.environment
+    if (!env || env.execution_mode !== 'remote') return
+    this.attachPortForwarder(entry.agent, entry.runner, env, win)
+  }
+
+  /** All forwarded ports an agent is currently exposing. Empty array for
+   *  non-launch agents and agents without an active tunnel. */
+  listForwardedPorts(agentId: string): ForwardedPort[] {
+    return this.portForwarders.get(agentId)?.list() ?? []
+  }
+
+  /** Every forwarded port across every launch agent in a given env.
+   *  Used by the env-level UI badge ("3 ports forwarded"). */
+  listForwardedPortsForEnv(envId: string): ForwardedPort[] {
+    const out: ForwardedPort[] = []
+    for (const [, f] of this.portForwarders) {
+      out.push(...f.list().filter((p) => p.environment_id === envId))
+    }
+    return out
   }
 
   /**
@@ -259,8 +386,18 @@ export class AgentManager {
           .catch(() => { /* best effort */ })
         win.webContents.send('agent:status-change', { agentId: agent.id, status, exitCode: code })
       })
+      runner.on('exit', () => this.disposePortForwarder(agent.id, win))
       runner.attach()
       this.running.set(agent.id, { agent, runner })
+      // If this remote agent is the env's launch runner, re-arm its port
+      // forwarder. Note: any URL the remote process printed BEFORE the
+      // re-attach is gone (we only see future stdout chunks), so a launch
+      // process that already printed its banner won't get auto-forwarded
+      // until it re-prints — the user can stop+play to refresh. Acceptable
+      // trade-off vs. running an `ss` probe on every reattach.
+      if (isLaunchTabName(agent.tab_name)) {
+        this.attachPortForwarder(agent, runner, env, win)
+      }
       try { win.webContents.send('agent:reattach', { agentId: agent.id, state: 'connected' }) } catch { /* ignore */ }
       console.log(`[AgentManager] Reattached ${agent.tab_name} (${agent.id})`)
     } catch (err) {
@@ -418,6 +555,9 @@ export class AgentManager {
       this.running.delete(agent.id)
       // Update status but keep the record so the tab stays open (user can see output/errors)
       this.agentsRepo.updateStatus(agent.id, status, code)
+      // Tear down any localhost-tunnels this agent's launch_command had
+      // opened. No-op for non-launch agents (the map miss is silent).
+      this.disposePortForwarder(agent.id, win)
       win.webContents.send('agent:status-change', {
         agentId: agent.id, status, exitCode: code
       })

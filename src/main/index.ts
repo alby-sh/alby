@@ -14,6 +14,7 @@ import { registerIssuesIPC } from './ipc/issues.ipc'
 import { registerReleasesIPC } from './ipc/releases.ipc'
 import { registerWebhooksIPC } from './ipc/webhooks.ipc'
 import { registerNotificationSubsIPC } from './ipc/notification-subs.ipc'
+import { registerPortsIPC } from './ipc/ports.ipc'
 import { AgentManager } from './agents/agent-manager'
 import { RoutineManager } from './agents/routine-manager'
 import { ConnectionPool } from './ssh/connection-pool'
@@ -278,6 +279,7 @@ app.whenReady().then(() => {
   registerReleasesIPC()
   registerWebhooksIPC()
   registerNotificationSubsIPC()
+  registerPortsIPC(agentManager)
   initAutoUpdater(() => mainWindow)
 
   // Bring the window to the foreground when the renderer asks (e.g. user
