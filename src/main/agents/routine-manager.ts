@@ -50,11 +50,18 @@ export class RoutineManager {
     // `stdbuf`, some CLIs (Python-backed ones especially) detect they're not
     // writing to a real TTY when tmux is in the pipeline and switch to block
     // buffering — which is what makes a manual routine look frozen for 20+
-    // seconds on first token. `|| …` ensures we degrade gracefully on servers
-    // that don't ship `stdbuf` (busybox / macOS without coreutils).
+    // seconds on first token.
+    //
+    // v0.8.4 FIX: the previous form — `(command -v stdbuf && stdbuf X || X) --flags`
+    // — is a bash SYNTAX ERROR. `(subshell) args` isn't valid bash; the parser
+    // rejects it with exit 2 before a single line of the script runs, which
+    // bypassed the v0.8.2 `tail -f /dev/null & wait $!` survival guard and made
+    // every manual routine show "Routine is stopped, exit 0" the instant it
+    // started. Rewritten as a `run_agent` function that accepts the full argv
+    // and prefixes with stdbuf only when available — word-splitting-safe via
+    // "$@", degrades silently on busybox / macOS without coreutils.
     const agentCmd =
-      `(command -v stdbuf >/dev/null && stdbuf -oL -eL ${routine.agent_type} ` +
-      `|| ${routine.agent_type}) --dangerously-skip-permissions -p "${shellEscape(promptForRun)}"`
+      `run_agent ${routine.agent_type} --dangerously-skip-permissions -p "${shellEscape(promptForRun)}"`
     const header = [
       '#!/bin/bash',
       `# Routine: ${routine.name}`,
@@ -63,6 +70,15 @@ export class RoutineManager {
       '[ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc" 2>/dev/null',
       '[ -f "$HOME/.bash_profile" ] && source "$HOME/.bash_profile" 2>/dev/null',
       '[ -f "$HOME/.profile" ] && source "$HOME/.profile" 2>/dev/null',
+      // v0.8.4: line-buffering prefix as a proper function instead of a
+      // subshell-args hack. Same graceful-fallback semantics, valid bash.
+      'run_agent() {',
+      '  if command -v stdbuf >/dev/null 2>&1; then',
+      '    stdbuf -oL -eL "$@"',
+      '  else',
+      '    "$@"',
+      '  fi',
+      '}',
       `trap 'echo "[routine] stopped"; exit 0' SIGTERM SIGINT`,
       `cd "${shellEscape(remotePath)}" || { echo "[routine] cd failed"; exit 1; }`,
       `echo -e "\\033[36m[routine] started — using $(command -v ${routine.agent_type} || echo 'NOT FOUND'): ${routine.agent_type}\\033[0m"`,
