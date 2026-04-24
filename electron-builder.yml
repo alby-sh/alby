@@ -45,7 +45,17 @@ win:
       arch: [x64, arm64]
     - target: zip
       arch: [x64, arm64]
-  artifactName: '${productName}-${version}-${arch}.${ext}'
+  # Top-level artifactName governs the Windows ZIP output. Mac ZIPs use the
+  # same `Alby-${version}-${arch}.${ext}` template — so if Windows zips
+  # shared that template, the two would collide at download-artifact merge
+  # time in the `publish` job and the second one in would overwrite the
+  # first, breaking the Mac auto-updater (latest-mac.yml's sha512 of a Mac
+  # zip referenced a file whose bytes were actually the Windows zip).
+  # The `-win` suffix makes the Windows zip filename unique. NSIS installers
+  # are not affected: the override under `nsis:` below keeps them as
+  # `Alby-Setup-${version}-${arch}.${ext}`, which never clashed with any
+  # Mac artifact (Mac has no "Setup" prefix).
+  artifactName: '${productName}-${version}-${arch}-win.${ext}'
   # Per-user install (no UAC prompt) + a proper Start Menu / Desktop
   # shortcut, which is what users expect from a 2025-era Electron app.
   # `verifyUpdateCodeSignature: false` is set so an unsigned dev build
