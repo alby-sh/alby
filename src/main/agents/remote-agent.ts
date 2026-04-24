@@ -53,9 +53,23 @@ export class RemoteAgent extends EventEmitter {
     // Single pty exec: write script, create session, apply options, then attach.
     // Collapses two SSH round-trips (setup + attach) into one, so output reaches
     // the renderer as soon as the first command in the chain produces any bytes.
+    //
+    // Pre-kill any zombie session with the same name before `tmux new-session`.
+    // `remain-on-exit on` (set in tmuxOpts above) is the behaviour we want while
+    // a run is live — it freezes the pane in "dead" state when bash exits so the
+    // final bytes reach the client — but it also means the SESSION outlives the
+    // pane indefinitely, because tmux only garbage-collects a session once its
+    // last pane is gone. Without this pre-kill, a second Start (a manual routine
+    // re-run, or a reconnect after a crash) hits "duplicate session" at
+    // new-session, the `&&` chain short-circuits before `attach-session`, and
+    // the user either sees an error or silently re-attaches to the frozen dead
+    // pane from the previous run with no fresh output. Separated with `;` and
+    // wrapped in `|| true` so it's a no-op when there's nothing to kill — we
+    // must not fail the chain here.
     const fullCmd = [
       `echo "${b64Script}" | base64 -d > "${scriptPath}"`,
       `chmod +x "${scriptPath}"`,
+      `{ tmux kill-session -t ${this.sessionName} 2>/dev/null || true; }`,
       `tmux new-session -d -s ${this.sessionName} -x 120 -y 40 "${scriptPath}"`,
       ...tmuxOpts,
       `exec tmux attach-session -t ${this.sessionName}`,

@@ -88,14 +88,34 @@ export class RoutineManager {
     // looks stuck. The echo is the user's proof the script got past setup.
     const invokeEcho =
       `echo -e "\\033[2m[routine] invoking ${routine.agent_type} — first response can take 10–30s on a cold start…\\033[0m"`
-    // Manual-only routines (interval null / 0) run the agent once, then
-    // PARK the session on a blocking `tail -f /dev/null` so the tmux buffer
-    // survives for the user to scroll through. If we let bash fall off the
-    // end of the script instead, tmux would kill the session the moment the
-    // agent CLI exits — the user would see "Routine is stopped, last exit
-    // code: 0" (the "bug" fixed in v0.8.2) and all output would be lost in
-    // the round-trip before the UI could catch up. The SIGTERM trap at the
-    // top of the script makes the Stop button cleanly exit the `tail`.
+    // Manual-only routines (interval null / 0) run the agent once and then
+    // EXIT cleanly. Earlier versions parked bash on `tail -f /dev/null & wait $!`
+    // to keep the tmux session alive so the user could scroll the buffer —
+    // fixing a v0.8.2 race where the session died before the last bytes of
+    // output reached the client. Two things made that park obsolete in v0.8.5,
+    // and it actively hurts now:
+    //   1. `remain-on-exit on` (set by RemoteAgent, see remote-agent.ts) keeps
+    //      the tmux pane visible in "dead" state once bash exits, so the buffer
+    //      survives on the server for the 1-second grace window RemoteAgent
+    //      gives before emitting `exit`.
+    //   2. RoutineView latches `hasRanOnce=true` and keeps TerminalPanel
+    //      mounted across stop/start (v0.8.5), preserving the xterm scrollback
+    //      client-side regardless of what happens server-side.
+    // With the park in place, bash would wait on tail forever → the tmux
+    // session never transitioned to dead → `markStopped` never fired →
+    // `tmux_session_name` stayed set in the DB → `isRunning` stayed true →
+    // the UI showed only a Stop button, and the user had no way to relaunch.
+    // Worse: if they pressed Stop or Ctrl+C the SIGTERM/SIGINT trap exited
+    // bash, the pane died, and `remain-on-exit` left a zombie session with
+    // the same name — so the NEXT `tmux new-session` would fail with
+    // "duplicate session" and the new start would silently re-attach to the
+    // dead pane instead of running the agent again.
+    // Now: let bash fall through to a natural exit. Pane dies → tmux marks it
+    // dead → RemoteAgent detects "Pane is dead" → emits exit → markStopped →
+    // UI flips to stopped with the xterm scrollback preserved → Start button
+    // reappears. RemoteAgent.start() pre-kills any leftover session of the
+    // same name so the restart is idempotent even against remain-on-exit
+    // zombies (see remote-agent.ts).
     const interval = routine.interval_seconds ?? 0
     if (!interval || interval <= 0) {
       return [
@@ -105,9 +125,7 @@ export class RoutineManager {
         agentCmd,
         'rc=$?',
         `echo -e "\\033[36m[routine] run finished (exit $rc)\\033[0m"`,
-        `echo -e "\\033[2m[routine] session left open for review — click Stop (or Ctrl+C in the pane) when you're done.\\033[0m"`,
-        'tail -f /dev/null &',
-        'wait $!',
+        `echo -e "\\033[2m[routine] click Start again — optionally with extra context in the launcher — to run another iteration.\\033[0m"`,
         'exit $rc',
         ''
       ].join('\n')

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { BrowserWindow } from 'electron'
+import { shell, type BrowserWindow } from 'electron'
 import type { Client } from 'ssh2'
 import { ProjectsRepo } from '../db/projects.repo'
 import { AgentsRepo } from '../db/agents.repo'
@@ -74,6 +74,23 @@ export class AgentManager {
    *    down the whole experience, not just the remote process).
    */
   private portForwarders: Map<string, PortForwarder> = new Map()
+
+  /**
+   * Active localhost-URL-openers for LOCAL launch agents, keyed by agentId.
+   * Mirror of `portForwarders` for the local case — same detect-URL-in-stdout
+   * mechanic, but without any SSH tunneling (the URL the framework prints is
+   * already reachable from the user's machine because the process runs on
+   * it). All this listener does is pop the page in the default browser, once
+   * per detected port, for the agent's lifetime.
+   *
+   * `opened` doubles as a de-dup set so frameworks that re-announce their URL
+   * on hot-reload (ASP.NET Core Kestrel is especially chatty — "Now listening
+   * on: http://localhost:N" every rebuild) don't spam a new browser tab on
+   * every rebuild. A full stop + restart through LaunchPlayButton creates a
+   * new agent with a new id and a fresh state, so the user gets exactly one
+   * browser tab per "intentional" launch.
+   */
+  private localBrowserOpeners: Map<string, { disposed: boolean; opened: Set<number> }> = new Map()
 
   constructor(
     private db: Database.Database,
@@ -178,21 +195,73 @@ export class AgentManager {
     }
   }
 
+  /** Local-env counterpart of `attachPortForwarder`. Local launch agents don't
+   *  need SSH tunnels (the process is literally on the user's localhost), but
+   *  they DO deserve the same "click play, see the page open" UX as remote
+   *  ones. This subscribes to the LocalAgent's stdout stream, runs the same
+   *  port-detector regex, and calls `shell.openExternal` once per unique port
+   *  — mirroring what PortForwarder.bind() does after a successful bind, just
+   *  without the bind. Dedupe is per-agent lifetime: restarting the process
+   *  inside the same pty (e.g. the framework auto-reloads) won't re-pop the
+   *  browser; a full Stop + Play cycle (= new agent id) will. */
+  private attachLocalBrowserOpener(agent: Agent, runner: LocalAgent): void {
+    if (this.localBrowserOpeners.has(agent.id)) return
+    const state = { disposed: false, opened: new Set<number>() }
+    this.localBrowserOpeners.set(agent.id, state)
+
+    runner.on('stdout-chunk', (text: string) => {
+      if (state.disposed) return
+      const ports = detectPortsInChunk(text)
+      if (ports.length === 0) return
+      for (const port of ports) {
+        if (state.opened.has(port)) continue
+        state.opened.add(port)
+        const url = `http://localhost:${port}`
+        console.log(`[AgentManager] local launch agent ${agent.id} printed ${url} — opening in default browser`)
+        try {
+          shell.openExternal(url).catch((err) => {
+            console.warn(`[AgentManager] openExternal(${url}) failed:`, (err as Error).message)
+          })
+        } catch (err) {
+          console.warn(`[AgentManager] openExternal(${url}) threw:`, (err as Error).message)
+        }
+      }
+    })
+
+    console.log(`[AgentManager] LocalBrowserOpener armed for launch agent ${agent.id} (${agent.tab_name})`)
+  }
+
+  private disposeLocalBrowserOpener(agentId: string): void {
+    const state = this.localBrowserOpeners.get(agentId)
+    if (!state) return
+    state.disposed = true
+    this.localBrowserOpeners.delete(agentId)
+  }
+
   /** Public: called from `agents:update` IPC right after the renderer
    *  renames a freshly-spawned terminal to `▶ <command>`. The rename is
    *  the LaunchPlayButton's signal that this terminal is the env's
    *  launch runner — port forwarding kicks in here.
    *
-   *  Local agents are skipped: the launch_command runs on the user's own
-   *  machine, so its localhost is already the user's localhost. No tunnel
-   *  needed. */
+   *  Two shapes:
+   *   - REMOTE env → full PortForwarder: detects localhost URLs, opens an
+   *     SSH local-forward for each, auto-opens the page in the browser.
+   *   - LOCAL env → lightweight LocalBrowserOpener: no tunneling (the
+   *     process is already on the user's machine), just detects the URL
+   *     and pops it in the default browser. Prior to this, local envs had
+   *     no opener at all — the user would stare at a Kestrel / vite /
+   *     uvicorn banner in the terminal and have to Cmd-click the URL
+   *     manually, which defeats the whole point of the play button. */
   markAsLaunchAgent(agentId: string, win: BrowserWindow): void {
     const entry = this.running.get(agentId)
     if (!entry) return
-    if (!(entry.runner instanceof RemoteAgent)) return
     const env = this.projectsRepo.getTaskWithEnvironment(entry.agent.task_id)?.environment
-    if (!env || env.execution_mode !== 'remote') return
-    this.attachPortForwarder(entry.agent, entry.runner, env, win)
+    if (!env) return
+    if (env.execution_mode === 'remote' && entry.runner instanceof RemoteAgent) {
+      this.attachPortForwarder(entry.agent, entry.runner, env, win)
+    } else if (env.execution_mode === 'local' && entry.runner instanceof LocalAgent) {
+      this.attachLocalBrowserOpener(entry.agent, entry.runner)
+    }
   }
 
   /** All forwarded ports an agent is currently exposing. Empty array for
@@ -500,10 +569,21 @@ export class AgentManager {
     // real system prompt).
     const localExtraEnv: Record<string, string> = {}
 
+    // Local-mode command syntax depends on the host running Alby:
+    //   POSIX (macOS/Linux) → bash/zsh, `"$VAR"` for env-var refs
+    //   Windows            → PowerShell, `$env:VAR` for env-var refs
+    // Remote commands always run in a bash login shell on the remote box,
+    // independent of the host OS, so `remoteCmd` stays bash-shaped.
+    const isWinHost = process.platform === 'win32'
+
     if (agentType === 'terminal') {
       // Plain terminal - just cd into the project
       remoteCmd = `bash -l -c "${shellEscape(cdPart)} && exec bash -l"`
-      localCmd = 'bash -l'
+      // Empty localCmd triggers LocalAgent's `wantsInteractiveShell` path,
+      // which spawns whatever the host's native shell is (zsh on macOS,
+      // pwsh on Windows). `cd` into the project folder is handled via the
+      // pty's `cwd` option, so no explicit cd is needed here.
+      localCmd = ''
     } else {
       // AI agent (claude, gemini, codex, etc.)
       const systemPrompt = this.buildSystemPrompt(taskData, agent.id, kind)
@@ -521,20 +601,28 @@ export class AgentManager {
       }
       const remoteAgentCmd = remoteCmdParts.join(' ')
 
-      // Local path: the agent command references env vars instead of quoting
-      // the prompt strings into the command line. `"$VAR"` in zsh/bash expands
-      // to the variable's value as a SINGLE argument, preserving newlines and
-      // all special chars verbatim. No escaping needed, no quoting bugs.
+      // Local path: agent command references env vars instead of quoting
+      // the prompt strings into the command line. This preserves newlines
+      // and special chars verbatim without escaping headaches.
+      //   POSIX: `"$ALBY_SYSTEM_PROMPT"` — bash/zsh expands to a single
+      //     argument whose value is the var's contents.
+      //   Windows (PowerShell): `$env:ALBY_SYSTEM_PROMPT` — no quotes needed,
+      //     PowerShell passes the var's value as a single argument when the
+      //     receiving CLI uses .NET argument parsing (which most Node-based
+      //     CLIs like claude/gemini/codex do).
+      const localVar = (name: string): string =>
+        isWinHost ? `$env:${name}` : `"$${name}"`
+
       const localCmdParts = [agentType]
       if (agentConfig.skip_permissions) localCmdParts.push('--dangerously-skip-permissions')
       if (agentConfig.use_chrome) localCmdParts.push('--chrome')
       if (systemPrompt && agentType === 'claude') {
         localExtraEnv.ALBY_SYSTEM_PROMPT = systemPrompt
-        localCmdParts.push('--system-prompt', '"$ALBY_SYSTEM_PROMPT"')
+        localCmdParts.push('--system-prompt', localVar('ALBY_SYSTEM_PROMPT'))
       }
       if (initialPrompt) {
         localExtraEnv.ALBY_INITIAL_PROMPT = initialPrompt
-        localCmdParts.push('"$ALBY_INITIAL_PROMPT"')
+        localCmdParts.push(localVar('ALBY_INITIAL_PROMPT'))
       }
       const localAgentCmd = localCmdParts.join(' ')
 
@@ -544,9 +632,18 @@ export class AgentManager {
           ? `${cdPart} && echo "Installing ${agentType}..." && ${installCmd} && ${remoteAgentCmd}`
           : `${cdPart} && ${remoteAgentCmd}`
         remoteCmd = `bash -l -c "${shellEscape(fullScript)}"`
-        localCmd = installCmd
-          ? `echo "Installing ${agentType}..." && ${installCmd} && ${localAgentCmd}`
-          : localAgentCmd
+        // On Windows, the auto-install flow (e.g. `npm install -g claude`)
+        // shells out through PowerShell, which chains commands with `;` not
+        // `&&`. POSIX keeps `&&` semantics (stop on first failure).
+        if (installCmd) {
+          const chain = isWinHost ? ';' : '&&'
+          const banner = isWinHost
+            ? `Write-Host "Installing ${agentType}..."`
+            : `echo "Installing ${agentType}..."`
+          localCmd = `${banner} ${chain} ${installCmd} ${chain} ${localAgentCmd}`
+        } else {
+          localCmd = localAgentCmd
+        }
       } else {
         remoteCmd = `bash -l -c "${shellEscape(`${cdPart} && ${remoteAgentCmd}`)}"`
         localCmd = localAgentCmd
@@ -573,9 +670,11 @@ export class AgentManager {
       this.running.delete(agent.id)
       // Update status but keep the record so the tab stays open (user can see output/errors)
       this.agentsRepo.updateStatus(agent.id, status, code)
-      // Tear down any localhost-tunnels this agent's launch_command had
-      // opened. No-op for non-launch agents (the map miss is silent).
+      // Tear down any localhost-tunnels (remote launch agents) or the
+      // browser-opener listener (local launch agents) that this agent had
+      // wired up. No-op for non-launch agents (the map miss is silent).
       this.disposePortForwarder(agent.id, win)
+      this.disposeLocalBrowserOpener(agent.id)
       win.webContents.send('agent:status-change', {
         agentId: agent.id, status, exitCode: code
       })

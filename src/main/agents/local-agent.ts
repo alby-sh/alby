@@ -42,7 +42,28 @@ persistLog(
   } shell=${process.env.SHELL ?? '<unset>'} arch=${process.arch} electron=${process.versions.electron}`,
 )
 
+const IS_WIN = process.platform === 'win32'
+
 function pickShell(): string {
+  if (IS_WIN) {
+    // Prefer PowerShell 7 (`pwsh.exe`) over the built-in Windows PowerShell 5
+    // (`powershell.exe`) — pwsh has better ANSI handling and is the
+    // recommended shell as of 2024. Fall back to cmd.exe if neither is
+    // installed (a 2009-era Windows install without the store, unlikely but
+    // cheap to support). The ComSpec env var is Windows' canonical path to
+    // the default command interpreter.
+    const candidates = [
+      'C:\\Program Files\\PowerShell\\7\\pwsh.exe',
+      'C:\\Program Files\\PowerShell\\pwsh.exe',
+      process.env['ProgramFiles'] ? `${process.env['ProgramFiles']}\\PowerShell\\7\\pwsh.exe` : '',
+      'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe',
+      process.env['ComSpec'] || 'C:\\Windows\\System32\\cmd.exe',
+    ].filter(Boolean)
+    for (const c of candidates) {
+      if (existsSync(c)) return c
+    }
+    return process.env['ComSpec'] || 'cmd.exe'
+  }
   // Respect user's preferred shell so PATH/aliases from their dotfiles work.
   // Falls back to /bin/zsh which is the macOS default since Catalina.
   const s = process.env.SHELL
@@ -135,6 +156,78 @@ export class LocalAgent extends EventEmitter {
       !this.command ||
       this.command === 'bash -l' ||
       this.command === 'zsh -l'
+
+    // Windows: single-attempt spawn via PowerShell / cmd. We don't need the
+    // POSIX rc-file fallback ladder below — PowerShell doesn't have the
+    // `.zshrc` + `.zprofile` silent-death patterns that drove that ladder
+    // on macOS. `-NoLogo` hides the copyright banner on pwsh; command mode
+    // uses `-Command` (or `/c` on cmd) to run the agent invocation and
+    // exit. `$env:ALBY_SYSTEM_PROMPT` style refs in `this.command` are
+    // prepared upstream in AgentManager (the POSIX path uses `"$VAR"`).
+    if (IS_WIN) {
+      const isPwsh = /pwsh\.exe$|powershell\.exe$/i.test(userShell)
+      const isCmd = /cmd\.exe$/i.test(userShell)
+      const winEnv: Record<string, string> = {
+        ...(process.env as Record<string, string>),
+        ...this.extraEnv,
+        TERM: 'xterm-256color',
+        COLORTERM: 'truecolor',
+      }
+      const winArgs: string[] = wantsInteractiveShell
+        ? isPwsh
+          ? ['-NoLogo']
+          : []
+        : isPwsh
+          ? ['-NoLogo', '-NoProfile', '-Command', this.command]
+          : isCmd
+            ? ['/c', this.command]
+            : []
+
+      try {
+        this.process = pty!.spawn(userShell, winArgs, {
+          name: 'xterm-256color',
+          cols: this.lastCols,
+          rows: this.lastRows,
+          cwd: this.cwd,
+          env: winEnv,
+        })
+        console.log(`${tag} [win-primary] spawned pid=${this.process.pid} shell=${userShell} args=${JSON.stringify(winArgs)}`)
+        persistLog(`${tag} [win-primary] spawn pid=${this.process.pid} shell=${userShell}`)
+        diag(`[win-primary] shell=${userShell} args=${JSON.stringify(winArgs).slice(0, 120)} cwd=${this.cwd}`)
+      } catch (err) {
+        this.fail(`Windows shell spawn failed: ${(err as Error).message}`)
+        return
+      }
+
+      this.process!.onData((data: string) => {
+        if (this.win.isDestroyed() || this.win.webContents.isDestroyed()) {
+          try { this.process?.kill() } catch { /* ignore */ }
+          this.process = null
+          return
+        }
+        try {
+          this.detectActivityFromOutput(data)
+          // Fan out to main-process listeners (e.g. AgentManager's
+          // localhost-URL → default-browser opener for local launch agents)
+          // before the IPC send, so any side-effect they trigger is in flight
+          // by the time the renderer paints the same line. Parity with
+          // RemoteAgent.openPty which also emits `stdout-chunk`.
+          this.emit('stdout-chunk', data)
+          this.win.webContents.send('agent:stdout', {
+            agentId: this.agentId,
+            data,
+          })
+        } catch { /* ignore */ }
+      })
+
+      this.process!.onExit(({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+        console.log(`${tag} [win-primary] exited code=${exitCode} signal=${signal ?? 0}`)
+        persistLog(`${tag} [win-primary] exited code=${exitCode} signal=${signal ?? 0}`)
+        this.process = null
+        this.emit('exit', exitCode)
+      })
+      return
+    }
 
     // Three-step fallback ladder for spawning the local shell. Each attempt
     // produces a tagged diag line so the user can see which strategy worked
@@ -276,6 +369,11 @@ export class LocalAgent extends EventEmitter {
         }
         try {
           this.detectActivityFromOutput(data)
+          // Same as the Windows primary onData handler: emit to main-process
+          // listeners before IPC so the localhost URL → browser opener can
+          // react before the renderer repaints. Must stay in sync with the
+          // onData at ~line 200.
+          this.emit('stdout-chunk', data)
           this.win.webContents.send('agent:stdout', {
             agentId: this.agentId,
             data,

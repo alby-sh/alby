@@ -6,6 +6,19 @@ on:
       - 'v*'
   workflow_dispatch:
 
+# Two build jobs run in parallel (macOS + Windows), each produces artifacts
+# with actions/upload-artifact. A third `publish` job with
+# needs: [build-macos, build-windows] downloads both artifact sets and does
+# a single atomic `gh release create` with everything at once.
+#
+# Why a dedicated publish job instead of letting each platform publish on
+# its own? Because a partial release (mac `.dmg` + `latest-mac.yml` uploaded,
+# windows `.exe` + `latest.yml` missing) would still make the macOS auto-updater
+# happy but leave every Windows client stuck — and vice versa. Failing fast
+# at the publish step ensures we only ship when *both* binaries are signed
+# and packaged. If the Windows build fails, the mac release simply doesn't
+# get created, and the tag sits unpublished until we fix the Windows job.
+
 jobs:
   build-macos:
     runs-on: macos-14
@@ -64,50 +77,123 @@ jobs:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        # No GH_TOKEN here on purpose. `npm run package` already passes
-        # `--publish never` so electron-builder never auto-uploads — we do the
-        # GitHub release in a dedicated step below via `gh release create`.
-        # Two publish paths (electron-builder auto-publish + manual
-        # `gh release create`) used to race: electron-builder would overwrite
-        # the zip/dmg bytes after the manual upload, but clients that fetched
-        # `latest-mac.yml` between the two uploads would see a checksum the
-        # freshly-overwritten zip no longer matched → sha512 mismatch.
-        run: npm run package
+        # No GH_TOKEN here on purpose. `npm run package` passes `--publish
+        # never` so electron-builder never auto-uploads; the `publish` job
+        # below is the single source of truth for hitting GitHub Releases.
+        run: npm run package:mac
 
-      - name: Upload artifacts (for non-tag runs)
-        if: "!startsWith(github.ref, 'refs/tags/')"
+      # Always upload — the `publish` job downloads this bundle to assemble
+      # the GitHub release. For non-tag runs (manual dispatch, debugging)
+      # the artifact is still reachable from the Actions tab for 90 days.
+      - name: Upload macOS artifacts
         uses: actions/upload-artifact@v4
         with:
           name: alby-macos
           path: |
             dist/*.dmg
+            dist/*.dmg.blockmap
             dist/*.zip
+            dist/*.zip.blockmap
             dist/latest-mac.yml
+          if-no-files-found: error
 
-      # Single publish path: `gh release create` with ALL artifacts at once,
-      # including `latest-mac.yml`. Atomic from the auto-updater's point of
-      # view — clients never see a `latest-mac.yml` whose referenced zip
-      # hasn't been uploaded yet. Fails fast if a release already exists for
-      # this tag (e.g. if someone manually `gh release create`d first), so a
-      # duplicate-publish race becomes a visible workflow failure instead of
-      # a silent checksum mismatch for end users.
+  build-windows:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      # windows-latest ships Python 3.x + MSBuild via Visual Studio Build
+      # Tools, both of which node-gyp needs for native modules
+      # (better-sqlite3, node-pty). Nothing extra to install here.
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Decode the Authenticode certificate secret into a .pfx file so
+      # electron-builder's signtool step picks it up. If the secret isn't
+      # configured yet (pre-purchase beta flows), skip and electron-builder
+      # emits an unsigned installer with a warning — still shippable, just
+      # with SmartScreen friction. Once WIN_CERTIFICATE_BASE64 lands this
+      # step is a no-op gate that starts producing signed builds.
+      - name: Decode Windows signing certificate
+        id: win_cert
+        if: env.WIN_CERTIFICATE_BASE64 != ''
+        env:
+          WIN_CERTIFICATE_BASE64: ${{ secrets.WIN_CERTIFICATE_BASE64 }}
+        shell: pwsh
+        run: |
+          $certPath = Join-Path $env:RUNNER_TEMP "win-cert.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String($env:WIN_CERTIFICATE_BASE64))
+          "cert_path=$certPath" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "signed=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Build + sign + package (Windows)
+        env:
+          # electron-builder picks up WIN_CSC_LINK + WIN_CSC_KEY_PASSWORD
+          # automatically when signing Windows artifacts. When the decode
+          # step above was skipped both env vars are empty and
+          # electron-builder logs "skipped signing: cert not provided" and
+          # proceeds unsigned — a deliberate escape hatch for beta releases.
+          WIN_CSC_LINK: ${{ steps.win_cert.outputs.cert_path }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CERTIFICATE_PASSWORD }}
+        run: npm run package:win
+
+      - name: Upload Windows artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alby-windows
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/*.zip
+            dist/*.zip.blockmap
+            dist/latest.yml
+          if-no-files-found: error
+
+  publish:
+    needs: [build-macos, build-windows]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alby-macos
+          path: dist
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: alby-windows
+          path: dist
+
+      - name: List artifacts (sanity check)
+        run: ls -la dist/
+
+      # Single atomic publish with every artifact from both platforms, so
+      # auto-update clients never see a `latest-mac.yml` / `latest.yml`
+      # referencing a file that hasn't uploaded yet. Fails fast if the
+      # release already exists (e.g. someone `gh release create`d it
+      # manually first), surfacing the duplicate-publish race as a visible
+      # workflow failure instead of a silent sha512 mismatch downstream.
       - name: Publish GitHub release
-        if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -e
           TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          gh release create "$TAG" \
-            "dist/Alby-${VERSION}-arm64.dmg" \
-            "dist/Alby-${VERSION}-arm64.dmg.blockmap" \
-            "dist/Alby-${VERSION}-arm64.zip" \
-            "dist/Alby-${VERSION}-arm64.zip.blockmap" \
-            "dist/Alby-${VERSION}-x64.dmg" \
-            "dist/Alby-${VERSION}-x64.dmg.blockmap" \
-            "dist/Alby-${VERSION}-x64.zip" \
-            "dist/Alby-${VERSION}-x64.zip.blockmap" \
-            "dist/latest-mac.yml" \
+          gh release create "$TAG" dist/* \
             --title "$TAG" \
             --generate-notes

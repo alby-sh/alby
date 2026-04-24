@@ -101,18 +101,44 @@ function findDeepLinkInArgv(argv: string[]): string | null {
 }
 
 function createWindow(): void {
+  const isMac = process.platform === 'darwin'
+
+  // Platform-specific window chrome:
+  //   macOS    → inset traffic lights + under-window vibrancy (the sidebar
+  //              draws behind them), matches the rest of the design.
+  //   Windows  → hidden native title bar with `titleBarOverlay` so Windows
+  //              still paints its minimize/maximize/close controls in the
+  //              right place. Solid backgroundColor is critical here —
+  //              without vibrancy a transparent window just renders black.
+  //   Linux    → same as Windows minus the overlay (KDE/GNOME don't support
+  //              it), the native bar stays visible.
+  const chromeOptions: Electron.BrowserWindowConstructorOptions = isMac
+    ? {
+        titleBarStyle: 'hiddenInset',
+        trafficLightPosition: { x: 15, y: 15 },
+        vibrancy: 'under-window',
+        visualEffectState: 'active',
+      }
+    : process.platform === 'win32'
+      ? {
+          titleBarStyle: 'hidden',
+          titleBarOverlay: {
+            color: '#0f0f0f',
+            symbolColor: '#ffffff',
+            height: 32,
+          },
+        }
+      : {}
+
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
     minWidth: 800,
     minHeight: 600,
     title: 'Alby',
-    titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 15, y: 15 },
     backgroundColor: '#0f0f0f',
-    vibrancy: 'under-window',
-    visualEffectState: 'active',
     hasShadow: true,
+    ...chromeOptions,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       // Sandbox the renderer process via Chromium's standard sandbox. Our
@@ -140,9 +166,11 @@ function createWindow(): void {
       .catch((err) => console.error('[main] loadFile failed:', err))
   }
 
-  // Surface load failures loudly — with vibrancy: 'under-window' a window
-  // that hasn't painted content yet is effectively transparent, so a silent
-  // dev-server miss looks like "Electron opens but the window is invisible".
+  // Surface load failures loudly — on macOS, with vibrancy: 'under-window',
+  // a window that hasn't painted content yet is effectively transparent,
+  // so a silent dev-server miss looks like "Electron opens but the window
+  // is invisible". On Windows/Linux the solid backgroundColor hides this,
+  // but the log is still useful for debugging.
   mainWindow.webContents.on('did-fail-load', (_e, code, desc, url) => {
     console.error(`[main] did-fail-load code=${code} desc="${desc}" url=${url}`)
   })

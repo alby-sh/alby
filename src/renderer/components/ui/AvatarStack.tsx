@@ -1,4 +1,5 @@
 import type { PresenceUser } from '../../stores/presence-store'
+import { UserAvatar } from './UserAvatar'
 
 const SIZES = {
   xs: { px: 14, ring: 'ring-1', text: 'text-[8px]' },
@@ -44,27 +45,20 @@ export function AvatarStack({
 }
 
 function Bubble({ user, size, z }: { user: PresenceUser; size: typeof SIZES[keyof typeof SIZES]; z: number }) {
-  if (user.avatar_url) {
-    return (
-      <img
-        src={user.avatar_url}
-        alt={user.name}
-        className={`rounded-full ${size.ring} ring-neutral-900 object-cover`}
-        style={{ width: size.px, height: size.px, zIndex: z }}
-      />
-    )
-  }
-  const initials = user.name
-    .split(/\s+/)
-    .slice(0, 2)
-    .map((p) => p[0]?.toUpperCase() ?? '')
-    .join('')
+  // Delegate to UserAvatar so this bubble shares the exact same
+  // image-with-initials-fallback path used by the primary sidebar's bottom
+  // CurrentUserAvatar and the user menu popup. Without this the same user
+  // rendered in two places would diverge the moment Google's
+  // lh3.googleusercontent.com token expired on one of them: UserAvatar swaps
+  // to a name-deterministic gradient bubble, while this used to keep an <img>
+  // around and show the broken-image glyph. The outer <span> carries the ring
+  // + zIndex that the parent stack expects.
   return (
     <span
-      className={`rounded-full ${size.ring} ring-neutral-900 bg-gradient-to-br from-sky-500 to-blue-600 text-white ${size.text} font-semibold flex items-center justify-center`}
-      style={{ width: size.px, height: size.px, zIndex: z }}
+      className={`inline-block rounded-full ${size.ring} ring-neutral-900`}
+      style={{ zIndex: z, lineHeight: 0 }}
     >
-      {initials || '?'}
+      <UserAvatar url={user.avatar_url} name={user.name} size={size.px} />
     </span>
   )
 }

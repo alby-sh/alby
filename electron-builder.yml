@@ -32,6 +32,37 @@ mac:
 dmg:
   artifactName: '${productName}-${version}-${arch}.${ext}'
   title: '${productName} ${version}'
+# Windows build — signing is env-driven via electron-builder's standard
+# WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD (or plain CSC_LINK/CSC_KEY_PASSWORD).
+# When no cert is provided the build produces an unsigned installer and
+# logs a warning — intended for beta flows before the Authenticode cert
+# is purchased. Once WIN_CERTIFICATE_BASE64 lands as a GitHub Secret the
+# CI job decodes it into a .pfx, sets WIN_CSC_LINK, and the same config
+# below produces a signed .exe with no further changes here.
+win:
+  target:
+    - target: nsis
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  artifactName: '${productName}-${version}-${arch}.${ext}'
+  # Per-user install (no UAC prompt) + a proper Start Menu / Desktop
+  # shortcut, which is what users expect from a 2025-era Electron app.
+  # `verifyUpdateCodeSignature: false` is set so an unsigned dev build
+  # can still auto-update itself during internal testing; when the
+  # production cert lands we bump this to true so electron-updater
+  # refuses to install updates signed by a different publisher.
+  verifyUpdateCodeSignature: false
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  allowElevation: true
+  shortcutName: '${productName}'
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  deleteAppDataOnUninstall: false
+  artifactName: '${productName}-Setup-${version}-${arch}.${ext}'
 npmRebuild: true
 publish:
   provider: github
