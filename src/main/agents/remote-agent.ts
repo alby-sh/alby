@@ -13,6 +13,10 @@ export class RemoteAgent extends EventEmitter {
   private titlePollMs = 0
   private waitingForReconnect = false
   private activityDebounceTimer: ReturnType<typeof setTimeout> | null = null
+  /** Last size the renderer asked for, kept so it survives a channel that is
+   *  not open yet and gets reapplied across reattach. Mirrors LocalAgent. */
+  private lastCols = 120
+  private lastRows = 40
 
   constructor(
     private agentId: string,
@@ -81,7 +85,7 @@ export class RemoteAgent extends EventEmitter {
       `echo "${b64Script}" | base64 -d > "${scriptPath}"`,
       `chmod +x "${scriptPath}"`,
       `{ tmux kill-session -t ${this.sessionName} 2>/dev/null || true; }`,
-      `tmux new-session -d -s ${this.sessionName} -x 120 -y 40 "${scriptPath}"`,
+      `tmux new-session -d -s ${this.sessionName} -x ${this.lastCols} -y ${this.lastRows} "${scriptPath}"`,
       ...tmuxOpts,
       `exec tmux attach-session -d -t ${this.sessionName}`,
     ].join(' && ')
@@ -117,7 +121,11 @@ export class RemoteAgent extends EventEmitter {
 
     this.sshClient.exec(
       cmd,
-      { pty: { cols: 120, rows: 40, term: 'xterm-256color' } },
+      // Open at the size the renderer last asked for rather than the 120x40
+      // default. The panel measures itself and calls resize() as soon as it
+      // mounts, which is usually while this exec is still in flight — and a
+      // resize that lands before the channel exists has nowhere to go.
+      { pty: { cols: this.lastCols, rows: this.lastRows, term: 'xterm-256color' } },
       (err, channel) => {
         if (err) {
           console.error(`[RemoteAgent ${this.agentId}] pty exec error:`, err.message)
@@ -131,6 +139,11 @@ export class RemoteAgent extends EventEmitter {
         }
 
         this.channel = channel
+
+        // A resize can land between the exec call above and this callback, so
+        // the pty was opened at whatever the size was then. Reapply whatever
+        // is current now that there is a channel to apply it to.
+        try { (channel as any).setWindow(this.lastRows, this.lastCols, 0, 0) } catch { /* ignore */ }
 
         channel.on('data', (data: Buffer) => {
           const text = data.toString('utf-8')
@@ -423,6 +436,13 @@ export class RemoteAgent extends EventEmitter {
   }
 
   resize(cols: number, rows: number): void {
+    // Always remember, even with no channel to apply it to. The panel sends
+    // its first size while the pty exec is still in flight, so dropping it
+    // here left the session at 120x40 with the renderer convinced it had
+    // already reported — the terminal then stayed the wrong size until
+    // something changed the dimensions again.
+    this.lastCols = cols
+    this.lastRows = rows
     if (this.channel) {
       try { (this.channel as any).setWindow(rows, cols, 0, 0) } catch { /* ignore */ }
     }
