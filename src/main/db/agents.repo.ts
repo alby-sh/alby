@@ -82,10 +82,12 @@ export class AgentsRepo {
   }
 
   listAll(): Agent[] {
-    // JOIN so each agent carries project_id — renderer needs it to filter per-project
+    // JOIN so each agent carries project_id — renderer needs it to filter
+    // per-project — and environment_id, which it needs to answer "is anything
+    // still open on this environment?" without walking tasks itself.
     return this.db
       .prepare(
-        `SELECT a.*, e.project_id AS project_id
+        `SELECT a.*, e.project_id AS project_id, t.environment_id AS environment_id
          FROM agents a
          JOIN tasks t ON t.id = a.task_id
          JOIN environments e ON e.id = t.environment_id

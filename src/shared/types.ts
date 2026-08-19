@@ -201,6 +201,7 @@ export interface Agent {
   sort_order: number
   // Populated only by agents.listAll() via JOIN; undefined from per-task queries.
   project_id?: string
+  environment_id?: string
   /**
    * Device-ownership fields — populated for every agent row so teammates on
    * other Macs can see the agent in their sidebar even when its env is

@@ -10,6 +10,7 @@ import {
   useUpdateEnvironment,
 } from '../../hooks/useProjects'
 import { useStack, useUpdateStack } from '../../hooks/useStacks'
+import { useAllAgents } from '../../hooks/useAgents'
 import type {
   AutoFixAgentType,
   Environment,
@@ -296,10 +297,11 @@ export function EditEnvironmentView({ environmentId }: Props) {
   const [test, setTest] = useState<TestState>({ status: 'idle' })
   const [submitError, setSubmitError] = useState<string | null>(null)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
-  const role: EnvironmentRole = environment?.role ?? 'operational'
+  const [role, setRole] = useState<EnvironmentRole>('operational')
 
   useEffect(() => {
     if (!environment) return
+    setRole(environment.role === 'deploy' ? 'deploy' : 'operational')
     setExecutionMode(environment.execution_mode === 'local' ? 'local' : 'remote')
     setPlatform(environment.platform === 'windows' ? 'windows' : 'linux')
     setName(environment.name ?? '')
@@ -321,6 +323,15 @@ export function EditEnvironmentView({ environmentId }: Props) {
     }
   }, [environment])
 
+  // Same invariants the create form enforces, so a role changed here cannot
+  // leave the environment in a shape that could not have been created:
+  // a deploy target is always remote, and an operational one is always Linux
+  // (the Windows path exists only for deploy pipelines over PowerShell).
+  useEffect(() => {
+    if (role === 'operational' && platform !== 'linux') setPlatform('linux')
+    if (role === 'deploy' && executionMode !== 'remote') setExecutionMode('remote')
+  }, [role, platform, executionMode])
+
   useEffect(() => {
     window.electronAPI.ssh.listHosts().then(setHosts).catch(() => { /* ignore */ })
   }, [])
@@ -329,6 +340,17 @@ export function EditEnvironmentView({ environmentId }: Props) {
   useEffect(() => {
     setTest({ status: 'idle' })
   }, [sshHost, sshUser, sshPort, sshKeyPath, sshAuthMethod, sshPassword, remotePath, platform, executionMode])
+
+  // Only meaningful once the environment has loaded and seeded `role`; before
+  // that the state still holds its 'operational' default and would read as a
+  // change on any deploy target.
+  const roleChanged = !!environment && role !== (environment.role ?? 'operational')
+
+  const { data: allAgents = [] } = useAllAgents()
+  const attachedAgentCount = useMemo(
+    () => allAgents.filter((a) => a.environment_id === environmentId && a.status === 'running').length,
+    [allAgents, environmentId]
+  )
 
   const trimmedHost = sshHost.trim()
   const trimmedPath = remotePath.trim()
@@ -373,6 +395,7 @@ export function EditEnvironmentView({ environmentId }: Props) {
     const dto: UpdateEnvironmentDTO = {
       name: name.trim(),
       label: label.trim() || undefined,
+      role,
       execution_mode: executionMode,
       platform,
       ssh_host: isLocal ? '' : trimmedHost,
@@ -475,12 +498,62 @@ export function EditEnvironmentView({ environmentId }: Props) {
           </div>
 
           <div className="border-t border-neutral-800">
-            {/* PURPOSE — read-only display */}
-            <Section title="Purpose" description="Set when this environment was created and not editable.">
-              <div className="inline-flex items-center gap-2 px-3 h-10 rounded-md border border-neutral-800 bg-neutral-900/60 text-[13px] text-neutral-200">
-                <span className="size-2 rounded-full bg-blue-400" />
-                {role === 'deploy' ? 'Deploy target' : 'Operational'}
+            {/* PURPOSE */}
+            <Section
+              title="Purpose"
+              description="Operational = place where you develop and spawn agents/terminals. Deploy = production target, read-only: only git pull + predefined commands."
+            >
+              <div className="flex gap-3">
+                <RoleCard
+                  active={role === 'operational'}
+                  onClick={() => setRole('operational')}
+                  title="Operational"
+                  description="Run terminals and AI agents from this workspace. Linux only."
+                  icon={
+                    <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="1.7">
+                      <path d="M4 17l6-5-6-5M12 19h8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  }
+                />
+                <RoleCard
+                  active={role === 'deploy'}
+                  onClick={() => setRole('deploy')}
+                  title="Deploy target"
+                  description="No interactive shell. One-click deploy: git pull + your migrate / cache-clear / restart commands."
+                  danger
+                  icon={
+                    <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="1.7">
+                      <path d="M12 3v14m0 0l-5-5m5 5l5-5M4 21h16" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  }
+                />
               </div>
+
+              {/* Switching away from operational takes the interactive shell
+                  with it, and any session still open on this environment would
+                  have no tab left to reach it from — while the tmux session
+                  carries on running on the server. Say so before saving. */}
+              {roleChanged && role === 'deploy' && (
+                <div className="mt-3 rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-[12px] text-amber-200">
+                  {attachedAgentCount > 0 ? (
+                    <>
+                      A deploy target has no interactive shell.{' '}
+                      <span className="font-medium text-amber-100">
+                        {attachedAgentCount} {attachedAgentCount === 1 ? 'session is' : 'sessions are'} still open
+                      </span>{' '}
+                      on this environment — close {attachedAgentCount === 1 ? 'it' : 'them'} first, or {attachedAgentCount === 1 ? 'it' : 'they'} will keep running on the server with no tab left to reach {attachedAgentCount === 1 ? 'it' : 'them'} from.
+                    </>
+                  ) : (
+                    <>A deploy target has no interactive shell — terminals and agents can no longer be spawned here. The deploy pipeline below is kept if you switch back.</>
+                  )}
+                </div>
+              )}
+
+              {roleChanged && role === 'operational' && (
+                <div className="mt-3 rounded-md border border-neutral-700 bg-neutral-900/60 px-3 py-2 text-[12px] text-neutral-300">
+                  This environment gets an interactive shell back. Its deploy pipeline is left untouched, so switching to a deploy target again restores it as it was.
+                </div>
+              )}
             </Section>
 
             {/* WHERE: local vs remote (operational only) */}
