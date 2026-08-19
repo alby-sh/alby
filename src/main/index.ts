@@ -6,6 +6,7 @@ import { registerSSHIPC } from './ipc/ssh.ipc'
 import { registerAgentsIPC } from './ipc/agents.ipc'
 import { registerRoutinesIPC } from './ipc/routines.ipc'
 import { registerSettingsIPC } from './ipc/settings.ipc'
+import { registerClipboardIPC } from './ipc/clipboard.ipc'
 import { registerAuthIPC } from './ipc/auth.ipc'
 import { registerTeamsIPC } from './ipc/teams.ipc'
 import { registerDeployIPC } from './ipc/deploy.ipc'
@@ -303,6 +304,7 @@ app.whenReady().then(() => {
   registerAgentsIPC(db, agentManager)
   registerRoutinesIPC(db, routineManager)
   registerSettingsIPC(db)
+  registerClipboardIPC()
   registerAuthIPC(db, () => mainWindow)
   registerTeamsIPC()
   registerDeployIPC(db, connectionPool, () => mainWindow)

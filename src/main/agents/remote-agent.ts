@@ -49,6 +49,13 @@ export class RemoteAgent extends EventEmitter {
       `tmux set-window-option -t ${this.sessionName} allow-rename on 2>/dev/null || true`,
       // Keep pane open after command exits so user can see output/errors
       `tmux set-option -t ${this.sessionName} remain-on-exit on 2>/dev/null || true`,
+      // `set-clipboard external` (the default) only forwards an application's
+      // OSC 52 outward when tmux believes the outer terminal takes it; without
+      // the capability it keeps the text in one of its own buffers instead,
+      // which is where every copy from inside a session was ending up. The
+      // renderer now handles OSC 52, so say so. Server-scoped and appended, so
+      // it adds to whatever the box already declares.
+      `tmux set-option -ga terminal-features ',xterm-256color:clipboard' 2>/dev/null || true`,
     ]
     // allow-passthrough is needed for Claude's OSC activity detection but not supported in older tmux
     if (this.agentType !== 'terminal') {

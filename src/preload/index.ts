@@ -18,6 +18,12 @@ interface TaskListParams {
 }
 
 const api = {
+  // navigator.clipboard is undefined under the file:// origin the packaged
+  // app loads from, so the renderer goes through Electron's clipboard module.
+  clipboard: {
+    write: (text: string): Promise<boolean> => ipcRenderer.invoke('clipboard:write', text),
+    read: (): Promise<string> => ipcRenderer.invoke('clipboard:read'),
+  },
   projects: {
     list: () => ipcRenderer.invoke('projects:list'),
     get: (id: string) => ipcRenderer.invoke('projects:get', id),

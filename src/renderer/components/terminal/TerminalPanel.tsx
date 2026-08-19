@@ -241,9 +241,12 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     // is roughly the low end of human typing cadence; any shorter and the
     // two bytes get treated as a paste and the backslash is dropped.
     term.attachCustomKeyEventHandler((e) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === 'c' && term.hasSelection()) {
+      if (e.type === 'keydown' && (e.metaKey || e.ctrlKey) && e.key === 'c' && term.hasSelection()) {
         const cleaned = term.getSelection().split('\n').map((l) => l.trimEnd()).join('\n')
-        navigator.clipboard.writeText(cleaned)
+        // Via the main process: navigator.clipboard does not exist under the
+        // file:// origin the packaged app loads from, and the call threw
+        // before it ever reached the system clipboard.
+        void window.electronAPI.clipboard.write(cleaned)
         term.clearSelection()
         return false // prevent default
       }
@@ -312,6 +315,42 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
       resizeTimer = setTimeout(() => fitAndSyncRef.current(), 50)
     }
 
+    // OSC 52 — "set the system clipboard" — is how anything running inside the
+    // pty copies: Claude's own copy action, vim with a clipboard register,
+    // tmux's copy-mode. xterm.js ships no handler for it, so every one of those
+    // was silently dropped. tmux is configured with `set-clipboard external`,
+    // meaning it forwards the sequence outward rather than keeping it, and when
+    // the outer terminal appears not to take it tmux falls back to stashing the
+    // text in a buffer of its own — which is the "copied N characters" message
+    // showing up instead of anything landing on the Mac.
+    //
+    // Payload is `<targets>;<base64>`; `?` is a read request, which stays
+    // unanswered on purpose — letting the pty read the user's clipboard is not
+    // something a remote session should be able to do unprompted.
+    term.parser.registerOscHandler(52, (payload: string) => {
+      const b64 = payload.slice(payload.indexOf(';') + 1)
+      if (!b64 || b64 === '?') return true
+      try {
+        const text = new TextDecoder().decode(
+          Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+        )
+        if (text) void window.electronAPI.clipboard.write(text)
+      } catch { /* not valid base64 — ignore */ }
+      return true
+    })
+
+    // xterm clears the selection on any mousedown, right button included, and
+    // that fires before `contextmenu` — so by the time the menu opened the
+    // selection was gone and its Copy item came up disabled. Swallow the
+    // right button in the capture phase so it never reaches xterm; the menu
+    // still gets its `contextmenu` event, with the selection intact.
+    const swallowRightMouseDown = (ev: MouseEvent): void => {
+      if (ev.button !== 2) return
+      ev.preventDefault()
+      ev.stopPropagation()
+    }
+    container.addEventListener('mousedown', swallowRightMouseDown, true)
+
     const resizeObserver = new ResizeObserver(() => doFit())
     resizeObserver.observe(container)
 
@@ -334,6 +373,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
       readyRef.current = false
       if (flushTimer) clearTimeout(flushTimer)
       if (resizeTimer) clearTimeout(resizeTimer)
+      container.removeEventListener('mousedown', swallowRightMouseDown, true)
       try { resizeObserver.disconnect() } catch { /* ignore */ }
       try { term.dispose() } catch { /* ignore */ }
       termRef.current = null
@@ -420,13 +460,14 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
 
     addItem('Copy', () => {
       if (hasSelection) {
-        navigator.clipboard.writeText(term.getSelection())
+        const cleaned = term.getSelection().split('\n').map((l) => l.trimEnd()).join('\n')
+        void window.electronAPI.clipboard.write(cleaned)
         term.clearSelection()
       }
     }, hasSelection)
 
     addItem('Paste', () => {
-      navigator.clipboard.readText().then((text) => {
+      void window.electronAPI.clipboard.read().then((text) => {
         if (text) {
           if (kind === 'routine') window.electronAPI.routines.writeStdin(agentId, text)
           else window.electronAPI.agents.writeStdin(agentId, text)
