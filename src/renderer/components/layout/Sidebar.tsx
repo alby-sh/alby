@@ -22,6 +22,7 @@ import {
   useReorderEnvironments,
   useUpdateEnvironment,
 } from '../../hooks/useProjects'
+import { useVisibleInterval } from '../../hooks/useVisibleInterval'
 import { useStacks, useReorderStacks } from '../../hooks/useStacks'
 import { useApps, useOpenIssueCounts } from '../../hooks/useIssues'
 import { useRoutines, useStartRoutine, useStopRoutine, useDeleteRoutine, useReorderRoutines } from '../../hooks/useRoutines'
@@ -406,7 +407,9 @@ interface GitStatusData { modified: number; staged: number; ahead: number; behin
 function useGitStatus(envId: string) {
   const [status, setStatus] = useState<GitStatusData | null>(null)
   const refresh = useCallback(() => { window.electronAPI.git.status(envId).then(setStatus).catch(() => {}) }, [envId])
-  useEffect(() => { refresh(); const t = setInterval(refresh, 15000); return () => clearInterval(t) }, [refresh])
+  // One `git status` over SSH per environment per tick — the heaviest poll in
+  // the app, and worthless while nobody can see the badge it feeds.
+  useVisibleInterval(refresh, 15000, [envId])
   return { status, refresh }
 }
 
@@ -2115,30 +2118,24 @@ function StackGroup({
 
 /* Count open (non-default) tasks for a stack. Hits the paginated
  * stack-tasks endpoint with per_page=1 and reads the `total` meta — so the
- * payload is O(1) regardless of stack size. Polled every 30 s. */
+ * payload is O(1) regardless of stack size. Polled every 30 s while visible. */
 function useStackOpenTaskCount(stackId: string): number {
   const [count, setCount] = useState(0)
-  useEffect(() => {
-    let cancelled = false
-    const run = async () => {
+  const run = useCallback(() => {
+    void (async () => {
       try {
         const page = (await window.electronAPI.tasks.listByStack(stackId, {
           status: 'open',
           per_page: 1,
           page: 1,
         })) as { total?: number }
-        if (!cancelled) setCount(page.total ?? 0)
+        setCount(page.total ?? 0)
       } catch {
         /* ignore */
       }
-    }
-    run()
-    const h = setInterval(run, 30_000)
-    return () => {
-      cancelled = true
-      clearInterval(h)
-    }
+    })()
   }, [stackId])
+  useVisibleInterval(run, 30_000, [stackId])
   return count
 }
 

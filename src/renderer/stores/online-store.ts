@@ -39,13 +39,31 @@ export function useOnlineBootstrap(): void {
       }
     }
     ping()
-    const timer = window.setInterval(ping, 30_000)
+    // Poll only while visible: the browser's own online/offline events cover
+    // the transitions that happen in the background, and a stale indicator on
+    // a window nobody is looking at costs nothing. Ping again on the way back
+    // so the dot is right by the time it is on screen.
+    let timer: number | null = null
+    const start = (): void => {
+      if (timer === null) timer = window.setInterval(ping, 30_000)
+    }
+    const stop = (): void => {
+      if (timer !== null) { window.clearInterval(timer); timer = null }
+    }
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') { stop(); return }
+      void ping()
+      stop(); start()
+    }
+    if (document.visibilityState !== 'hidden') start()
+    document.addEventListener('visibilitychange', onVisibility)
 
     return () => {
       cancelled = true
       window.removeEventListener('online', onOnline)
       window.removeEventListener('offline', onOffline)
-      window.clearInterval(timer)
+      document.removeEventListener('visibilitychange', onVisibility)
+      stop()
     }
   }, [setOnline])
 }
