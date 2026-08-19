@@ -437,6 +437,35 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
           webgl = null
         })
         termRef.current.loadAddon(webgl)
+        // Attaching the renderer re-lays out the viewport, so the pane has to
+        // be measured again afterwards or it keeps the geometry it had under
+        // the DOM renderer — text filling part of the container with a dead
+        // strip beside it.
+        //
+        // The visibility effect above fits at rAF and again 80 ms later, which
+        // was a guess at when this dynamic import would land. It holds when the
+        // chunk is warm and loses at startup, where it is a cold load competing
+        // with every SSH connection the app opens at once — landing after even
+        // a one-second re-measure. Fitting here removes the guess: it happens
+        // when the addon is actually attached, whenever that turns out to be.
+        //
+        // Two steps, because they cover two different ways this shows up and
+        // only one of them can be told apart from here. fitAndSync corrects a
+        // pane whose column count no longer matches the container. It is not
+        // enough on its own: FitAddon.fit() returns early when the proposed
+        // size equals the current one, so a pane holding the right cols with
+        // canvases laid out for the old geometry would sail straight through
+        // it. refresh() redraws every row against the renderer that is now
+        // attached, which covers that second case.
+        const settle = (): void => {
+          if (disposed || !termRef.current) return
+          fitAndSyncRef.current()
+          try { termRef.current.refresh(0, termRef.current.rows - 1) } catch { /* ignore */ }
+        }
+        settle()
+        // xterm sizes its canvases on the frame after the addon is loaded, so
+        // one more pass once that has happened.
+        window.setTimeout(settle, 0)
       } catch {
         /* GPU unavailable — DOM renderer takes over silently. */
       }
