@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useVisibleInterval } from '../../hooks/useVisibleInterval'
 import { useQuery } from '@tanstack/react-query'
 import { TerminalPanel } from '../terminal/TerminalPanel'
 import { ErrorBoundary } from '../ui/ErrorBoundary'
@@ -152,11 +153,11 @@ export function RoutineView({ routineId }: Props) {
   // Tick once a second while a run is in progress so the runtime clock
   // advances without us having to re-render on every stdout chunk.
   const [, setTick] = useState(0)
-  useEffect(() => {
-    if (!lastRunStartedAt || lastRunFinishedAt) return
-    const t = setInterval(() => setTick((n) => n + 1), 1000)
-    return () => clearInterval(t)
-  }, [lastRunStartedAt, lastRunFinishedAt])
+  const running = !!lastRunStartedAt && !lastRunFinishedAt
+  // A clock nobody can read does not need to tick. The elapsed time is derived
+  // from lastRunStartedAt, so the first render after the window comes back is
+  // already correct — no catch-up needed.
+  useVisibleInterval(() => { if (running) setTick((n) => n + 1) }, 1000, [running])
 
   const isRunning = !!routine?.tmux_session_name
   const isLoop = (routine?.interval_seconds ?? 0) > 0

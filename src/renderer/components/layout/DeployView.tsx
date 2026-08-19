@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { useVisibleInterval } from '../../hooks/useVisibleInterval'
 import { Play, CheckmarkFilled, WarningAltFilled, Renew, Settings, Stop, Terminal as TerminalIcon } from '@carbon/icons-react'
 import { useEnvironment } from '../../hooks/useProjects'
 import { useAppStore } from '../../stores/app-store'
@@ -156,13 +157,14 @@ export function DeployView({ environmentId }: Props) {
 
   useEffect(() => {
     // Force a fresh `git fetch` on open so the behind/ahead counts reflect
-    // reality before the user decides whether to deploy. Later refreshes are
-    // no-fetch (cheap status check) on a 30 s interval.
+    // reality before the user decides whether to deploy.
     refreshSync(true)
-    const t = setInterval(() => refreshSync(), 30_000)
-    return () => clearInterval(t)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [environmentId])
+
+  // Later refreshes are no-fetch (cheap status check) and only while visible;
+  // skipLeading because the effect above already covered the opening fetch.
+  useVisibleInterval(() => refreshSync(), 30_000, [environmentId], { skipLeading: true })
 
   // Subscribe once per environment change — the preload helpers return an
   // unsubscribe function that we call on cleanup to avoid stacking listeners.

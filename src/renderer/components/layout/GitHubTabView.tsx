@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import { useVisibleInterval } from '../../hooks/useVisibleInterval'
 import {
   LogoGithub,
   Launch,
@@ -97,11 +98,7 @@ export function GitHubTabView({ env }: { env: Environment }) {
     }
   }, [envId, remoteUrl])
 
-  useEffect(() => {
-    void loadAll()
-    const interval = setInterval(() => { void loadAll() }, 30_000)
-    return () => clearInterval(interval)
-  }, [loadAll])
+  useVisibleInterval(() => { void loadAll() }, 30_000, [loadAll])
 
   const run = async (label: string, fn: () => Promise<unknown>): Promise<void> => {
     setActionRunning(label)

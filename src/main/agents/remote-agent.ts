@@ -10,6 +10,7 @@ export class RemoteAgent extends EventEmitter {
   private sessionName: string
   private detached = false
   private titlePollTimer: ReturnType<typeof setInterval> | null = null
+  private titlePollMs = 0
   private waitingForReconnect = false
   private activityDebounceTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -214,11 +215,36 @@ export class RemoteAgent extends EventEmitter {
 
   /* ============ Title polling (reliable, works through tmux) ============ */
 
-  private startTitlePolling(): void {
+  /* Polling the pane title is how a working -> idle transition is noticed, and
+   * that transition is what fires the "your agent finished" notification, so it
+   * cannot be tied to window visibility — it matters most when nobody is
+   * looking. What it can do is match its rate to what it is waiting for.
+   *
+   * While the agent works, a completion can land at any moment and the 3 s beat
+   * stays. While it sits idle the only thing that starts it up again is input,
+   * and this process is the one delivering that input (see writeStdin), so the
+   * fast cadence can be restored the instant it arrives rather than discovered
+   * by polling. Idle agents are the common case — one `tmux display-message`
+   * over SSH every 3 s each, around the clock, for sessions doing nothing. */
+  private static readonly TITLE_POLL_WORKING_MS = 3000
+  private static readonly TITLE_POLL_IDLE_MS = 15000
+
+  private startTitlePolling(intervalMs = RemoteAgent.TITLE_POLL_WORKING_MS): void {
     this.stopTitlePolling()
+    this.titlePollMs = intervalMs
     this.titlePollTimer = setInterval(() => {
       this.pollTitle()
-    }, 3000)
+    }, intervalMs)
+  }
+
+  /** Re-tunes the beat when the activity state changes; no-op if unchanged. */
+  private syncTitlePollRate(): void {
+    if (!this.titlePollTimer) return
+    const wanted =
+      this.currentActivity === 'idle'
+        ? RemoteAgent.TITLE_POLL_IDLE_MS
+        : RemoteAgent.TITLE_POLL_WORKING_MS
+    if (wanted !== this.titlePollMs) this.startTitlePolling(wanted)
   }
 
   private stopTitlePolling(): void {
@@ -226,6 +252,7 @@ export class RemoteAgent extends EventEmitter {
       clearInterval(this.titlePollTimer)
       this.titlePollTimer = null
     }
+    this.titlePollMs = 0
   }
 
   private pollTitle(): void {
@@ -299,6 +326,7 @@ export class RemoteAgent extends EventEmitter {
         this.activityDebounceTimer = setTimeout(() => {
           this.activityDebounceTimer = null
           this.currentActivity = 'idle'
+          this.syncTitlePollRate()
           this.win.webContents.send('agent:activity', {
             agentId: this.agentId,
             activity: 'idle'
@@ -316,6 +344,7 @@ export class RemoteAgent extends EventEmitter {
         }, 1500)
       } else {
         this.currentActivity = newActivity
+        this.syncTitlePollRate()
         this.win.webContents.send('agent:activity', {
           agentId: this.agentId,
           activity: newActivity
@@ -375,6 +404,12 @@ export class RemoteAgent extends EventEmitter {
 
   writeStdin(data: string): void {
     this.channel?.write(data)
+    // Input is the only thing that wakes an idle agent, and it arrives here
+    // first — go back to the fast beat now instead of waiting up to 15 s to
+    // notice the session started working again.
+    if (this.currentActivity === 'idle' && this.titlePollTimer) {
+      this.startTitlePolling(RemoteAgent.TITLE_POLL_WORKING_MS)
+    }
   }
 
   resize(cols: number, rows: number): void {
