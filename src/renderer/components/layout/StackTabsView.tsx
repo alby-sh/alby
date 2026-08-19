@@ -9,6 +9,7 @@ import {
   PinFilled,
 } from '@carbon/icons-react'
 import { useAppStore, type StackTabKey } from '../../stores/app-store'
+import { SHOW_ISSUES_UI, SHOW_TASKS_UI } from '../../ui-features'
 import {
   containerKeyForStack,
   defaultPinsForStack,
@@ -36,7 +37,13 @@ export function StackTabsView({ stackId }: { stackId: string }) {
   const pinOrder = useAppStore((s) => s.pinOrder)
   const togglePin = useAppStore((s) => s.togglePin)
 
-  const activeTab: StackTabKey = stackTabs[stackId] ?? 'overview'
+  const storedTab: StackTabKey = stackTabs[stackId] ?? 'overview'
+  // A tab persisted from before these were hidden would otherwise leave the
+  // body blank with no tab highlighted.
+  const activeTab: StackTabKey =
+    (storedTab === 'issues' && !SHOW_ISSUES_UI) || (storedTab === 'tasks' && !SHOW_TASKS_UI)
+      ? 'overview'
+      : storedTab
 
   if (!stack) {
     return (
@@ -48,8 +55,8 @@ export function StackTabsView({ stackId }: { stackId: string }) {
 
   const tabs: { key: StackTabKey; label: string; icon: React.ReactNode }[] = [
     { key: 'overview', label: 'Overview', icon: <DashboardIcon size={14} /> },
-    { key: 'issues', label: 'Issues', icon: <Debug size={14} /> },
-    { key: 'tasks', label: 'Tasks', icon: <TaskIcon size={14} /> },
+    ...(SHOW_ISSUES_UI ? [{ key: 'issues' as const, label: 'Issues', icon: <Debug size={14} /> }] : []),
+    ...(SHOW_TASKS_UI ? [{ key: 'tasks' as const, label: 'Tasks', icon: <TaskIcon size={14} /> }] : []),
     { key: 'settings', label: 'Settings', icon: <SettingsIcon size={14} /> },
   ]
 
@@ -127,10 +134,10 @@ export function StackTabsView({ stackId }: { stackId: string }) {
       {/* Tab body */}
       <div className="flex-1 min-h-0 overflow-hidden">
         {activeTab === 'overview' && <StackOverviewTab stackId={stackId} projectId={stack.project_id} />}
-        {activeTab === 'issues' && (
+        {SHOW_ISSUES_UI && activeTab === 'issues' && (
           <IssuesListView projectId={stack.project_id} stackId={stackId} />
         )}
-        {activeTab === 'tasks' && <StackTasksTab stackId={stackId} projectId={stack.project_id} />}
+        {SHOW_TASKS_UI && activeTab === 'tasks' && <StackTasksTab stackId={stackId} projectId={stack.project_id} />}
         {/* settings opens a dedicated overlay view via openEditStack */}
       </div>
     </div>
@@ -170,7 +177,7 @@ function StackOverviewTab({ stackId, projectId }: { stackId: string; projectId: 
     <div className="h-full overflow-y-auto px-6 py-5 space-y-5">
       <StatStrip
         items={[
-          { label: 'Open issues', value: openIssueCounts.total, accent: 'text-red-300' },
+          ...(SHOW_ISSUES_UI ? [{ label: 'Open issues', value: openIssueCounts.total, accent: 'text-red-300' }] : []),
           { label: 'Environments', value: stackEnvs.length, accent: 'text-neutral-200' },
           { label: 'Sessions', value: runningSessions, accent: 'text-blue-300' },
         ]}

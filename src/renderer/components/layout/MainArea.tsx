@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { SHOW_ISSUES_UI, SHOW_TASKS_UI } from '../../ui-features'
 import { useAppStore } from '../../stores/app-store'
 import { useActivityStore } from '../../stores/activity-store'
 import { useAgents, useAllAgents, useSpawnAgent, useKillAgent, useDeleteAgent, useAgentStdout } from '../../hooks/useAgents'
@@ -813,7 +814,7 @@ export function MainArea() {
       </ErrorBoundary>
     )
   }
-  if (editingTaskSettingsId) {
+  if (SHOW_TASKS_UI && editingTaskSettingsId) {
     return (
       <ErrorBoundary fallback={settingsFallback}>
         <TaskSettingsView taskId={editingTaskSettingsId} />
@@ -834,14 +835,14 @@ export function MainArea() {
       </ErrorBoundary>
     )
   }
-  if (selectedIssueId) {
+  if (SHOW_ISSUES_UI && selectedIssueId) {
     return (
       <ErrorBoundary fallback={settingsFallback}>
         <IssueDetailView issueId={selectedIssueId} />
       </ErrorBoundary>
     )
   }
-  if (issuesProjectId) {
+  if (SHOW_ISSUES_UI && issuesProjectId) {
     return (
       <ErrorBoundary fallback={settingsFallback}>
         <IssuesListView projectId={issuesProjectId} stackId={issuesStackId} />

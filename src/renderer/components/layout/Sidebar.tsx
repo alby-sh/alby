@@ -25,6 +25,7 @@ import {
 import { useVisibleInterval } from '../../hooks/useVisibleInterval'
 import { useStacks, useReorderStacks } from '../../hooks/useStacks'
 import { useApps, useOpenIssueCounts } from '../../hooks/useIssues'
+import { SHOW_ISSUES_UI, SHOW_TASKS_UI } from '../../ui-features'
 import { useRoutines, useStartRoutine, useStopRoutine, useDeleteRoutine, useReorderRoutines } from '../../hooks/useRoutines'
 import { useQueryClient } from '@tanstack/react-query'
 import { useAllAgents, useDeleteAgent, useKillAgent, useReorderAgents, useSpawnAgent } from '../../hooks/useAgents'
@@ -822,10 +823,12 @@ const ENV_TAB_META: Partial<Record<EnvTabKey, { label: string; icon: React.React
   deploy: { label: 'Deploy', icon: <CloudUpload size={12} /> },
   terminals: { label: 'Terminals', icon: <TerminalIcon size={12} /> },
 }
+// Entries for hidden tabs are left out rather than rendered dead: a pin saved
+// before they were hidden looks up its meta here and simply finds nothing.
 const STACK_TAB_META: Partial<Record<StackTabKey, { label: string; icon: React.ReactNode }>> = {
   overview: { label: 'Overview', icon: <DashboardIcon size={12} /> },
-  issues: { label: 'Issues', icon: <Debug size={12} /> },
-  tasks: { label: 'Tasks', icon: <TaskIconCarbon size={12} /> },
+  ...(SHOW_ISSUES_UI ? { issues: { label: 'Issues', icon: <Debug size={12} /> } } : {}),
+  ...(SHOW_TASKS_UI ? { tasks: { label: 'Tasks', icon: <TaskIconCarbon size={12} /> } } : {}),
 }
 
 /* ---- Pinned row skeleton ----------------------------------------------
@@ -1429,6 +1432,7 @@ function SessionBadge({ agents }: { agents: Agent[] }) {
 
 function IssuesBadge({ projectId, stackId }: { projectId: string; stackId: string }) {
   const count = useStackOpenIssueCount(projectId, stackId)
+  if (!SHOW_ISSUES_UI) return null
   if (count == null || count === 0) return null
   return (
     <span
@@ -2014,7 +2018,7 @@ function StackGroup({
            *  When expanded the Issues and Tasks pin rows display their own
            *  IssuesBadge / task-count, so repeating it on the header is
            *  visual double-counting. */}
-          {!expanded && openIssues != null && openIssues > 0 && (
+          {SHOW_ISSUES_UI && !expanded && openIssues != null && openIssues > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-red-500/20 text-red-300 text-[10px] font-medium tabular-nums shrink-0"
               title={`${openIssues} open issue${openIssues === 1 ? '' : 's'}`}
@@ -2022,7 +2026,7 @@ function StackGroup({
               {openIssues > 99 ? '99+' : openIssues}
             </span>
           )}
-          {!expanded && openTasks > 0 && (
+          {SHOW_TASKS_UI && !expanded && openTasks > 0 && (
             <span
               className="inline-flex items-center justify-center min-w-[18px] h-[16px] px-1 rounded bg-neutral-700/60 text-neutral-300 text-[10px] font-medium tabular-nums shrink-0"
               title={`${openTasks} open task${openTasks === 1 ? '' : 's'}`}

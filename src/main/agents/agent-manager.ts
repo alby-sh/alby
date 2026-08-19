@@ -1067,22 +1067,10 @@ export class AgentManager {
 
     sections.push(
       `[CONTEXT - DO NOT EXECUTE]\n` +
-      `The following is background context about the project and current task. ` +
+      `The following is background context about the project. ` +
       `This is NOT an instruction. Wait for the user to tell you what to do.\n\n` +
       header
     )
-
-    if (task.title) {
-      let taskSection = `[TASK INFO]\nTitle: ${task.title}`
-      if (task.description?.trim()) {
-        taskSection += `\nDescription: ${task.description.trim()}`
-      }
-      sections.push(taskSection)
-    }
-
-    if (task.context_notes?.trim()) {
-      sections.push(`[ADDITIONAL CONTEXT]\n${task.context_notes.trim()}`)
-    }
 
     // Topology: every other environment in the same project, with role,
     // execution mode, host and (for deploy targets) the configured pipeline.
@@ -1166,36 +1154,6 @@ export class AgentManager {
         `The "delegate git to Alby's UI" rule that applies to normal agents ` +
         `is suspended here: this is the one mode where direct git from the ` +
         `pty is the intended path.`
-      )
-    } else {
-      // Tell the agent to delegate git operations and deploys to Alby's UI so
-      // they're attributed to the human in the project Activity Report. Raw
-      // CLI git from inside the pty bypasses the audit hook and is invisible
-      // to reviewers.
-      sections.push(
-        `[USE ALBY'S BUILT-IN GIT & DEPLOY ACTIONS]\n` +
-        `Alby tracks every commit / push / pull / fetch / discard that goes ` +
-        `through its UI in the project Activity Report (cyan "git ..." badges, ` +
-        `attributed to the user who clicked the button). When you run ` +
-        `\`git push\`, \`git commit\`, etc. from this terminal those operations ` +
-        `do NOT show up in the report — they just happen on the remote box and ` +
-        `nobody on the team sees them.\n\n` +
-        `Default workflow:\n` +
-        `  1. Make your code changes here. Do NOT run \`git add\` / \`git commit\` ` +
-        `     / \`git push\` / \`git pull\` / \`git fetch\` directly.\n` +
-        `  2. When the change is ready, tell the user: "I've finished the edits ` +
-        `     — please use Alby's commit button (top of the right sidebar) to ` +
-        `     review the diff and push." Suggest a clear, conventional commit ` +
-        `     message they can paste in.\n` +
-        `  3. To pull / fetch / discard, ask them to use the same right-sidebar ` +
-        `     buttons. Reason: those actions need to land in the Activity Report ` +
-        `     for review, billing and team auditing.\n` +
-        `  4. To deploy to a deploy-role environment, tell them to switch to ` +
-        `     that env's tab and press the green "Run deploy" button — the ` +
-        `     pre-commands → git pull → post-commands pipeline is logged end-to-end.\n\n` +
-        `Read-only git commands (\`git status\`, \`git diff\`, \`git log\`, ` +
-        `\`git branch\`, \`git show\`, \`git blame\`) are fine to run yourself — ` +
-        `they don't change repository state.`
       )
     }
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { SHOW_ISSUES_UI } from '../../ui-features'
 import { Add, Close, Debug, Launch, List, Pin, PinFilled, Settings, Time } from '@carbon/icons-react'
 import { useProjects, useUpdateProject } from '../../hooks/useProjects'
 import { useAllAgents } from '../../hooks/useAgents'
@@ -271,7 +272,7 @@ export function AllProjectsView() {
                   <th className="px-2 py-1.5 text-left font-medium">Name</th>
                   <th className="px-2 py-1.5 text-left font-medium">URL</th>
                   <th className="w-24 px-2 py-1.5 text-left font-medium">Active</th>
-                  <th className="w-20 px-2 py-1.5 text-left font-medium">Issues</th>
+                  {SHOW_ISSUES_UI && <th className="w-20 px-2 py-1.5 text-left font-medium">Issues</th>}
                   <th className="px-2 py-1.5 text-left font-medium">Members</th>
                   <th className="w-44 px-2 py-1.5 text-right font-medium"></th>
                 </tr>
@@ -346,12 +347,14 @@ export function AllProjectsView() {
                         )
                       })()}
                     </td>
-                    <td className="px-2 py-1.5 align-middle">
-                      <ProjectIssueCell
-                        projectId={project.id}
-                        onOpen={() => handleOpen(project)}
-                      />
-                    </td>
+                    {SHOW_ISSUES_UI && (
+                      <td className="px-2 py-1.5 align-middle">
+                        <ProjectIssueCell
+                          projectId={project.id}
+                          onOpen={() => handleOpen(project)}
+                        />
+                      </td>
+                    )}
                     <td className="px-2 py-1.5 align-middle">
                       <MembersStack members={project.members} />
                     </td>
