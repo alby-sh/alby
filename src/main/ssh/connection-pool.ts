@@ -101,6 +101,10 @@ export class ConnectionPool extends EventEmitter {
           this.emit('reconnected', env.id, client)
         }
 
+        // Fires on first connect as well as reconnect, for work that wants
+        // every established link rather than only the restored ones.
+        this.emit('ready', env.id, client, env)
+
         resolve(client)
       })
 
