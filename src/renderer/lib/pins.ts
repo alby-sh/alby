@@ -1,4 +1,5 @@
 import type { Environment } from '../../shared/types'
+import { SHOW_ISSUES_UI } from '../ui-features'
 import type { EnvTabKey, StackTabKey } from '../stores/app-store'
 
 /** Full pin key format stored in the app-store. */
@@ -57,7 +58,9 @@ export function defaultPinsForEnv(env: Pick<Environment, 'role'>): EnvTabKey[] {
  *  header click still lands on Overview for discovery, but the user sees
  *  the issues count in the sidebar without any setup. */
 export function defaultPinsForStack(): StackTabKey[] {
-  return ['issues']
+  // Nothing to default-pin while Issues is hidden; a pin pointing at a tab the
+  // shell no longer renders would sit in the sidebar doing nothing.
+  return SHOW_ISSUES_UI ? ['issues'] : []
 }
 
 /** Compute the effective ordered pin list for a container. When the user
