@@ -13,6 +13,7 @@ import { cloudClient } from '../cloud/cloud-client'
 import { loadToken } from '../auth/keychain'
 import { getDeviceInfo } from '../device/device-id'
 import { isLaunchTabName } from '../../shared/launch-agent'
+import { reapOrphanSessions } from './session-reaper'
 import type { Agent, Task, Environment, Project, ForwardedPort } from '../../shared/types'
 
 interface RunningAgent {
@@ -103,6 +104,35 @@ export class AgentManager {
     this.connectionPool.on('reconnected', (envId: string, newClient: Client) => {
       this.reconnectAgentsForEnvironment(envId, newClient)
     })
+
+    // Every established link is a chance to clear sessions nothing owns.
+    this.connectionPool.on('ready', (_envId: string, client: Client, env: Environment) => {
+      if (env.execution_mode !== 'remote') return
+      void this.sweepOrphanSessions(client, `${env.ssh_user}@${env.ssh_host}`)
+    })
+  }
+
+  /** Clears tmux sessions on a host that belong to no agent on any device.
+   *  Fully guarded inside the reaper — see session-reaper.ts. */
+  private async sweepOrphanSessions(client: Client, label: string): Promise<void> {
+    const known = new Set<string>(this.running.keys())
+    for (const a of this.agentsRepo.listAll()) known.add(a.id)
+
+    let cloudIds: Set<string> | null = null
+    try {
+      const cloudAgents = await cloudClient.listAllRunningAgents()
+      cloudIds = new Set((cloudAgents as Array<{ id: string }>).map((a) => a.id))
+    } catch {
+      // Left null on purpose: without the cross-device list the reaper must
+      // not touch anything, or it would kill another machine's sessions.
+      cloudIds = null
+    }
+
+    try {
+      await reapOrphanSessions(client, known, cloudIds, label)
+    } catch (err) {
+      console.warn('[AgentManager] orphan sweep failed:', (err as Error).message)
+    }
   }
 
   /**
@@ -821,11 +851,46 @@ export class AgentManager {
     return !!record.tab_name && record.tab_name.toLowerCase().startsWith('chat')
   }
 
+  /** Kills the tmux session of an agent that has no runner attached here.
+   *  Best-effort: if the environment cannot be reached the session is left to
+   *  the reaper, which sweeps on the next successful connection. */
+  private async killDetachedRemoteSession(agentId: string): Promise<void> {
+    const record = this.agentsRepo.get(agentId)
+    if (!record?.task_id) return
+
+    const taskData = this.projectsRepo.getTaskWithEnvironment(record.task_id)
+    if (!taskData || taskData.environment.execution_mode !== 'remote') return
+
+    const client = this.connectionPool.get(taskData.environment.id)
+    if (!client) return
+
+    const sessionName = `agent-${agentId.substring(0, 8)}`
+    await new Promise<void>((resolve) => {
+      let settled = false
+      const done = (): void => { if (!settled) { settled = true; resolve() } }
+      try {
+        client.exec(`tmux kill-session -t ${sessionName} 2>/dev/null || true`, (err, channel) => {
+          if (err) { done(); return }
+          channel.on('close', done)
+        })
+      } catch { done() }
+      setTimeout(done, 5000)
+    })
+    console.log(`[AgentManager] killed detached session ${sessionName}`)
+  }
+
   async kill(agentId: string): Promise<void> {
     const entry = this.running.get(agentId)
     if (entry) {
       await entry.runner.kill()
       this.running.delete(agentId)
+    } else {
+      // No live runner does not mean no live session. After a restart, or for
+      // an agent started on another machine, the tmux session is still up on
+      // the server while this process knows nothing about it — and the row is
+      // about to be deleted, so nothing will ever come back for it. Kill it
+      // directly off the environment's connection.
+      await this.killDetachedRemoteSession(agentId)
     }
     // Chat agents keep their record + transcript + session_id so the user
     // can resume. For everyone else, `kill` is still terminal — the tab's

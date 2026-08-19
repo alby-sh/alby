@@ -221,6 +221,14 @@ export function registerAgentsIPC(db: Database.Database, agentManager: AgentMana
     // from another Mac" footgun that would orphan the owner's PTY.
     const refusal = refuseIfForeignLocal(agentId)
     if (refusal) throw new Error(refusal)
+    // Route through the manager rather than dropping the row directly: an
+    // agent being deleted may still own a live tmux session, and deleting the
+    // only record of it is what strands `claude` on the server for weeks.
+    // agentManager.kill deletes the row itself once the session is gone.
+    await agentManager.kill(agentId)
+    // kill() keeps the row for chat agents (transcript + session_id survive) —
+    // delete is unconditional by contract, so finish the job. No-op when kill
+    // already removed it.
     repo.delete(agentId)
     await cloudWrite(cloudClient.deleteAgent(agentId))
   })

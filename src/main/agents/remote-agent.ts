@@ -435,6 +435,14 @@ export class RemoteAgent extends EventEmitter {
 
     return new Promise((resolve) => {
       if (!this.isSSHConnected()) {
+        // The local channel goes away but the tmux session on the box does
+        // not, and the caller is about to delete the row that points at it.
+        // Nothing here can reach the server, so say so plainly — the reaper
+        // sweeps this session on the next successful connection.
+        console.warn(
+          `[RemoteAgent ${this.agentId}] kill requested while SSH was down; ` +
+          `session ${this.sessionName} left for the reaper`
+        )
         this.channel?.close()
         this.channel = null
         resolve()
