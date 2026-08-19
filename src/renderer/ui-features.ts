@@ -17,3 +17,24 @@
  */
 export const SHOW_ISSUES_UI = false
 export const SHOW_TASKS_UI = false
+
+/**
+ * Render terminals on the GPU via @xterm/addon-webgl.
+ *
+ * Off. The addon draws glyphs from a texture atlas it builds itself, and when
+ * that atlas stops agreeing with the grid the result is text drawn doubled or
+ * on top of itself — legible again after a resize forces a rebuild, wrong again
+ * as soon as more is typed. Nothing in this codebase ever called
+ * clearTextureAtlas, which is the documented way to keep the two in step.
+ *
+ * It also attaches asynchronously and re-lays out the viewport when it does,
+ * which is why the panel carried a fit at rAF, another 80 ms later, and further
+ * re-measures on top: each was an attempt to land after an event with no fixed
+ * timing. On a cold start, competing with every SSH connection the app opens at
+ * once, it lost anyway and the pane kept the geometry it had before.
+ *
+ * xterm's DOM renderer has neither problem. It costs more per frame on heavy
+ * output, which is a real trade and the reason this is a flag rather than a
+ * deletion — but a terminal that renders wrong is not worth the frames.
+ */
+export const USE_WEBGL_RENDERER = false

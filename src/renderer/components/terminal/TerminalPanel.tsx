@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, memo } from 'react'
+import { USE_WEBGL_RENDERER } from '../../ui-features'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -457,6 +458,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
   // renderer (xterm's fallback) handles hidden panes, and since they're not
   // being rendered anyway the slower fallback is invisible.
   useEffect(() => {
+    if (!USE_WEBGL_RENDERER) return
     if (!visible) return
     let disposed = false
     let webgl: import('@xterm/addon-webgl').WebglAddon | null = null
