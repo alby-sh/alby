@@ -30,6 +30,25 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
 
   const lastSizeRef = useRef({ cols: 0, rows: 0 })
 
+  /* ---- sizing diagnostics -------------------------------------------------
+   * A terminal that comes up not filling its pane has several possible causes
+   * that look identical from the outside, and the difference between them is
+   * only visible from inside the running app: what the container measured, what
+   * was proposed from it, whether anything was sent, and when the WebGL addon
+   * attached relative to all of it. This records that timeline and the context
+   * menu can put it on screen, so the numbers can be read off rather than
+   * guessed at. Off unless asked for; recording is a handful of strings. */
+  const diagRef = useRef<string[]>([])
+  const diagStartRef = useRef<number>(performance.now())
+  const [diagOpen, setDiagOpen] = useState(false)
+  const [, forceDiagRender] = useState(0)
+  const diagPush = useCallback((line: string): void => {
+    const at = Math.round(performance.now() - diagStartRef.current)
+    diagRef.current.push(`${String(at).padStart(5)}ms  ${line}`)
+    if (diagRef.current.length > 60) diagRef.current.shift()
+    forceDiagRender((n) => n + 1)
+  }, [])
+
   /**
    * The single place a size reaches the PTY.
    *
@@ -47,22 +66,35 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
    * resizes regardless, and each one makes tmux repaint the pane under a
    * running TUI.
    */
-  const fitAndSync = useCallback((): void => {
+  const fitAndSync = useCallback((why: string = 'unknown'): void => {
     const container = containerRef.current
     const term = termRef.current
     const fit = fitRef.current
     if (!container || !term || !fit) return
-    if (container.offsetWidth === 0 || container.offsetHeight === 0) return
+    if (container.offsetWidth === 0 || container.offsetHeight === 0) {
+      diagPush(`${why}: skipped, container ${container?.offsetWidth ?? '?'}x${container?.offsetHeight ?? '?'}`)
+      return
+    }
 
-    try { fit.fit() } catch { return }
+    const boxW = container.offsetWidth
+    const boxH = container.offsetHeight
+    try { fit.fit() } catch { diagPush(`${why}: fit threw`); return }
 
     const { cols, rows } = term
-    if (cols < MIN_COLS || rows < MIN_ROWS) return
-    if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return
+    if (cols < MIN_COLS || rows < MIN_ROWS) {
+      diagPush(`${why}: rejected ${cols}x${rows} (below minimum)`)
+      return
+    }
+    if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) {
+      diagPush(`${why}: box ${boxW}x${boxH} → ${cols}x${rows} (unchanged, nothing sent)`)
+      return
+    }
 
+    diagPush(`${why}: box ${boxW}x${boxH} → ${cols}x${rows} SENT`)
     lastSizeRef.current = { cols, rows }
     if (kind === 'routine') window.electronAPI.routines.resize(agentId, cols, rows)
     else window.electronAPI.agents.resize(agentId, cols, rows)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentId, kind])
 
   // Effects below call this through a ref so they never re-run — recreating
@@ -312,7 +344,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const doFit = (): void => {
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => fitAndSyncRef.current(), 50)
+      resizeTimer = setTimeout(() => fitAndSyncRef.current('resize-observer'), 50)
     }
 
     // OSC 52 — "set the system clipboard" — is how anything running inside the
@@ -358,7 +390,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     requestAnimationFrame(() => {
       if (disposed) return
       // Initial fit without debounce
-      fitAndSyncRef.current()
+      fitAndSyncRef.current('mount')
       try {
         for (const chunk of bufferRef.current) {
           term.write(chunk)
@@ -382,7 +414,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     // rather than anything driven by the result.
     const settleTimers = [250, 1000].map((ms) =>
       window.setTimeout(() => {
-        if (!disposed) fitAndSyncRef.current()
+        if (!disposed) fitAndSyncRef.current(`settle-${ms}ms`)
       }, ms)
     )
 
@@ -409,7 +441,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
   // along the right / bottom edges) — fitting twice fixes that.
   useEffect(() => {
     if (!visible || !fitRef.current || !termRef.current) return
-    const doFit = (): void => fitAndSyncRef.current()
+    const doFit = (): void => fitAndSyncRef.current('became-visible')
     const raf = requestAnimationFrame(doFit)
     const t = setTimeout(doFit, 80)
     // Refocus the terminal so keyboard input (arrows / esc / ctrl-c) goes
@@ -459,7 +491,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
         // attached, which covers that second case.
         const settle = (): void => {
           if (disposed || !termRef.current) return
-          fitAndSyncRef.current()
+          fitAndSyncRef.current('webgl-attached')
           try { termRef.current.refresh(0, termRef.current.rows - 1) } catch { /* ignore */ }
         }
         settle()
@@ -525,12 +557,16 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
 
     addItem('Select All', () => { term.selectAll() })
 
+    addItem(diagOpen ? 'Hide sizing diagnostics' : 'Show sizing diagnostics', () => {
+      setDiagOpen((v) => !v)
+    })
+
     document.body.appendChild(menu)
     const close = (ev: MouseEvent) => {
       if (!menu.contains(ev.target as Node)) { menu.remove(); document.removeEventListener('mousedown', close) }
     }
     setTimeout(() => document.addEventListener('mousedown', close), 0)
-  }, [agentId, kind])
+  }, [agentId, kind, diagOpen])
 
   return (
     <div
@@ -542,6 +578,34 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
         ref={containerRef}
         style={{ position: 'absolute', top: 8, left: 8, right: 8, bottom: 8 }}
       />
+
+      {diagOpen && (
+        <div
+          className="absolute z-40 left-2 top-2 max-h-[70%] w-[min(680px,calc(100%-1rem))] overflow-auto rounded-md border border-amber-500/40 bg-black/90 p-3 font-mono text-[11px] leading-relaxed text-amber-200"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div className="mb-2 flex items-center justify-between gap-4 text-amber-100">
+            <span className="font-semibold">Sizing diagnostics — agent {agentId.slice(0, 8)}</span>
+            <button
+              type="button"
+              onClick={() => setDiagOpen(false)}
+              className="rounded px-2 py-0.5 text-amber-300 hover:bg-amber-500/20"
+            >
+              close
+            </button>
+          </div>
+          <div className="mb-2 text-amber-300/80">
+            window {window.innerWidth}x{window.innerHeight} · dpr {window.devicePixelRatio} ·
+            {' '}container {containerRef.current?.offsetWidth ?? '?'}x{containerRef.current?.offsetHeight ?? '?'} ·
+            {' '}terminal {termRef.current?.cols ?? '?'}x{termRef.current?.rows ?? '?'}
+          </div>
+          {diagRef.current.length === 0 ? (
+            <div className="text-amber-300/60">nothing recorded yet</div>
+          ) : (
+            diagRef.current.map((l, i) => <div key={i} className="whitespace-pre">{l}</div>)
+          )}
+        </div>
+      )}
 
       {isScrolledUp && visible && (
         <button
