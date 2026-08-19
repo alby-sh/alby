@@ -3,9 +3,11 @@ import ReactDOM from 'react-dom/client'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import App from './App'
 import { installRendererErrorHooks } from './error-reporter'
+import { installRenderThrottle } from './render-throttle'
 import './styles/globals.css'
 
 installRendererErrorHooks()
+installRenderThrottle()
 
 const queryClient = new QueryClient({
   defaultOptions: {

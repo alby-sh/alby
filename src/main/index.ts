@@ -150,7 +150,11 @@ function createWindow(): void {
     }
   })
 
-  // Prevent background throttling so terminals stay responsive
+  // Prevent background throttling so terminal output keeps flowing and the
+  // agent heartbeat timers keep counting while Alby sits behind other windows.
+  // The cost is that Chromium also keeps compositing: the renderer pauses its
+  // CSS animations on visibilitychange so hidden windows stop producing frames
+  // (see renderer/render-throttle.ts).
   mainWindow.webContents.backgroundThrottling = false
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {

@@ -82,3 +82,14 @@ body {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* When the window is hidden (minimised, app hidden, or fully occluded) stop
+ * every animation from producing frames. Chromium would otherwise keep
+ * compositing them, because the main process disables background throttling to
+ * keep terminals and heartbeats alive. See renderer/render-throttle.ts. */
+html[data-window-hidden] *,
+html[data-window-hidden] *::before,
+html[data-window-hidden] *::after {
+  animation-play-state: paused !important;
+  transition: none !important;
+}
