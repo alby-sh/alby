@@ -56,6 +56,9 @@ export class RemoteAgent extends EventEmitter {
       // renderer now handles OSC 52, so say so. Server-scoped and appended, so
       // it adds to whatever the box already declares.
       `tmux set-option -ga terminal-features ',xterm-256color:clipboard' 2>/dev/null || true`,
+      // Follow the most recent client rather than the smallest one, so a stale
+      // attach cannot hold the pane hostage at its own dimensions.
+      `tmux set-option -t ${this.sessionName} window-size latest 2>/dev/null || true`,
     ]
     // allow-passthrough is needed for Claude's OSC activity detection but not supported in older tmux
     if (this.agentType !== 'terminal') {
@@ -79,22 +82,24 @@ export class RemoteAgent extends EventEmitter {
     // wrapped in `|| true` so it's a no-op when there's nothing to kill — we
     // must not fail the chain here.
     //
-    // `attach-session -d` throughout: tmux sizes a window to its SMALLEST
-    // attached client and repaints for all of them. A laptop that sleeps or
-    // changes network leaves the previous `attach-session` process hanging on
-    // the server — TCP will not notice for hours — so reconnecting adds a
-    // second client instead of replacing the first. The pane then snaps to
-    // whatever that stale client last reported and two clients fight over the
-    // redraw, which is what a session "going haywire" looks like from here.
-    // -d evicts the others, which is what we mean every time: this window is
-    // the one client.
+    // tmux sizes a window to its SMALLEST attached client by default, so a
+    // stale `attach-session` left behind by a laptop that slept — TCP will not
+    // notice for hours — used to pin the pane to whatever that dead client last
+    // reported. `window-size latest` (below) makes the newest client win
+    // instead, which fixes that without evicting anyone.
+    //
+    // Do NOT reach for `attach-session -d` here. It detaches the others, and
+    // when two clients both want the session — two machines, or a channel the
+    // server still believes in — each one evicts the other, the evicted side
+    // reconnects, and the pane resizes on every round trip. That is an endless
+    // small/large flicker, not a fix.
     const fullCmd = [
       `echo "${b64Script}" | base64 -d > "${scriptPath}"`,
       `chmod +x "${scriptPath}"`,
       `{ tmux kill-session -t ${this.sessionName} 2>/dev/null || true; }`,
       `tmux new-session -d -s ${this.sessionName} -x ${this.lastCols} -y ${this.lastRows} "${scriptPath}"`,
       ...tmuxOpts,
-      `exec tmux attach-session -d -t ${this.sessionName}`,
+      `exec tmux attach-session -t ${this.sessionName}`,
     ].join(' && ')
 
     this.openPty(fullCmd)
@@ -113,7 +118,13 @@ export class RemoteAgent extends EventEmitter {
       `tmux has-session -t ${this.sessionName} 2>/dev/null && echo ALIVE || echo DEAD`,
       (_ok, output) => {
         if (output.trim() === 'ALIVE') {
-          this.openPty(`tmux attach-session -d -t ${this.sessionName}`)
+          this.openPty(
+            // Applied on every attach, not just on create: sessions made before
+            // this option existed would otherwise keep sizing to the smallest
+            // client for the rest of their life.
+            `tmux set-option -t ${this.sessionName} window-size latest 2>/dev/null; ` +
+            `exec tmux attach-session -t ${this.sessionName}`
+          )
         } else {
           // Stale tmux session — surface as a clean completion, not an error.
           this.emit('exit', 0)
@@ -394,7 +405,13 @@ export class RemoteAgent extends EventEmitter {
       `tmux has-session -t ${this.sessionName} 2>/dev/null && echo ALIVE || echo DEAD`,
       (_ok, output) => {
         if (output.trim() === 'ALIVE') {
-          this.openPty(`tmux attach-session -d -t ${this.sessionName}`)
+          this.openPty(
+            // Applied on every attach, not just on create: sessions made before
+            // this option existed would otherwise keep sizing to the smallest
+            // client for the rest of their life.
+            `tmux set-option -t ${this.sessionName} window-size latest 2>/dev/null; ` +
+            `exec tmux attach-session -t ${this.sessionName}`
+          )
         } else {
           this.emit('exit', 0)
         }
