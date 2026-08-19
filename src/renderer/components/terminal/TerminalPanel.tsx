@@ -4,6 +4,11 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import '@xterm/xterm/css/xterm.css'
 
+/** Below this a "terminal" is a measurement artefact, not a window the user
+ *  resized to. Sending it onward re-wraps the remote session's scrollback. */
+const MIN_COLS = 20
+const MIN_ROWS = 4
+
 interface TerminalPanelProps {
   agentId: string
   registerWriter: (agentId: string, writer: (data: string) => void) => void
@@ -22,6 +27,48 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
   const [isScrolledUp, setIsScrolledUp] = useState(false)
   const [reattachState, setReattachState] = useState<'idle' | 'connecting' | 'failed'>('idle')
   const [reattachMessage, setReattachMessage] = useState<string | null>(null)
+
+  const lastSizeRef = useRef({ cols: 0, rows: 0 })
+
+  /**
+   * The single place a size reaches the PTY.
+   *
+   * FitAddon has no lower bound worth trusting: given a container with no
+   * layout box it still proposes `Math.max(2, …) x Math.max(1, …)`, so a pane
+   * measured mid-layout resizes the remote tty to 2x1. tmux reflows the pane
+   * and everything inside re-wraps at two columns — which is what a terminal
+   * "going haywire, characters on top of each other" actually is. Once the
+   * scrollback has been rewrapped that narrow, fitting back to the real size
+   * does not undo it.
+   *
+   * So: refuse to measure a container that has no box, refuse a result that
+   * is too small to be a real terminal, and stay quiet when nothing changed.
+   * The last part matters on its own — every tab switch used to fire two
+   * resizes regardless, and each one makes tmux repaint the pane under a
+   * running TUI.
+   */
+  const fitAndSync = useCallback((): void => {
+    const container = containerRef.current
+    const term = termRef.current
+    const fit = fitRef.current
+    if (!container || !term || !fit) return
+    if (container.offsetWidth === 0 || container.offsetHeight === 0) return
+
+    try { fit.fit() } catch { return }
+
+    const { cols, rows } = term
+    if (cols < MIN_COLS || rows < MIN_ROWS) return
+    if (cols === lastSizeRef.current.cols && rows === lastSizeRef.current.rows) return
+
+    lastSizeRef.current = { cols, rows }
+    if (kind === 'routine') window.electronAPI.routines.resize(agentId, cols, rows)
+    else window.electronAPI.agents.resize(agentId, cols, rows)
+  }, [agentId, kind])
+
+  // Effects below call this through a ref so they never re-run — recreating
+  // the terminal to pick up a new callback identity would drop the session.
+  const fitAndSyncRef = useRef(fitAndSync)
+  fitAndSyncRef.current = fitAndSync
 
   const scrollToBottom = useCallback(() => {
     if (termRef.current) {
@@ -259,21 +306,10 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     })
 
     // Debounced fit + resize — avoids flooding IPC during window drag
-    let lastCols = 0, lastRows = 0
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const doFit = (): void => {
       if (resizeTimer) clearTimeout(resizeTimer)
-      resizeTimer = setTimeout(() => {
-        try {
-          fit.fit()
-          const { cols, rows } = term
-          if (cols > 0 && rows > 0 && (cols !== lastCols || rows !== lastRows)) {
-            lastCols = cols; lastRows = rows
-            if (kind === 'routine') window.electronAPI.routines.resize(agentId, cols, rows)
-            else window.electronAPI.agents.resize(agentId, cols, rows)
-          }
-        } catch { /* ignore */ }
-      }, 50)
+      resizeTimer = setTimeout(() => fitAndSyncRef.current(), 50)
     }
 
     const resizeObserver = new ResizeObserver(() => doFit())
@@ -283,14 +319,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
     requestAnimationFrame(() => {
       if (disposed) return
       // Initial fit without debounce
-      try {
-        fit.fit()
-        lastCols = term.cols; lastRows = term.rows
-        if (lastCols > 0 && lastRows > 0) {
-          if (kind === 'routine') window.electronAPI.routines.resize(agentId, lastCols, lastRows)
-          else window.electronAPI.agents.resize(agentId, lastCols, lastRows)
-        }
-      } catch { /* ignore */ }
+      fitAndSyncRef.current()
       try {
         for (const chunk of bufferRef.current) {
           term.write(chunk)
@@ -321,16 +350,7 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
   // along the right / bottom edges) — fitting twice fixes that.
   useEffect(() => {
     if (!visible || !fitRef.current || !termRef.current) return
-    const doFit = (): void => {
-      try {
-        fitRef.current?.fit()
-        const term = termRef.current
-        if (term && term.cols > 0 && term.rows > 0) {
-          if (kind === 'routine') window.electronAPI.routines.resize(agentId, term.cols, term.rows)
-          else window.electronAPI.agents.resize(agentId, term.cols, term.rows)
-        }
-      } catch { /* ignore */ }
-    }
+    const doFit = (): void => fitAndSyncRef.current()
     const raf = requestAnimationFrame(doFit)
     const t = setTimeout(doFit, 80)
     // Refocus the terminal so keyboard input (arrows / esc / ctrl-c) goes
