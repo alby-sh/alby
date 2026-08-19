@@ -368,11 +368,30 @@ export const TerminalPanel = memo(function TerminalPanel({ agentId, registerWrit
       readyRef.current = true
     })
 
+    // A terminal that mounts during app startup measures a layout that has not
+    // finished settling — the window is created at a fixed 1400x900 and the
+    // panes work out their own widths afterwards. The first fit therefore sizes
+    // the session to whatever the container happened to be, and if nothing
+    // measures again the pane stays that size against a larger container: text
+    // filling part of the space with a dead strip beside it, until something
+    // like a zoom change forces a fresh measurement.
+    //
+    // Two late re-measures cover the settling window. They cost nothing when
+    // the size is already right — fitAndSync stops at its own dedupe and no IPC
+    // goes out — and they cannot oscillate, being two fixed one-shot timers
+    // rather than anything driven by the result.
+    const settleTimers = [250, 1000].map((ms) =>
+      window.setTimeout(() => {
+        if (!disposed) fitAndSyncRef.current()
+      }, ms)
+    )
+
     return () => {
       disposed = true
       readyRef.current = false
       if (flushTimer) clearTimeout(flushTimer)
       if (resizeTimer) clearTimeout(resizeTimer)
+      settleTimers.forEach((t) => clearTimeout(t))
       container.removeEventListener('mousedown', swallowRightMouseDown, true)
       try { resizeObserver.disconnect() } catch { /* ignore */ }
       try { term.dispose() } catch { /* ignore */ }
