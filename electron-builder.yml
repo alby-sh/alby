@@ -27,8 +27,12 @@ mac:
   gatekeeperAssess: false
   entitlements: resources/entitlements.mac.plist
   entitlementsInherit: resources/entitlements.mac.plist
-  notarize:
-    teamId: S69XDW999Q
+  # electron-builder 26 changed this from an object to a boolean; the team id
+  # now comes from APPLE_TEAM_ID, which the release workflow already exports
+  # alongside APPLE_ID and the app-specific password. Keeping the old
+  # `notarize: {teamId}` shape fails schema validation before any build work
+  # starts, on Windows too — the config is parsed whole on every platform.
+  notarize: true
 dmg:
   artifactName: '${productName}-${version}-${arch}.${ext}'
   title: '${productName} ${version}'
