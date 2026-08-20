@@ -134,6 +134,27 @@ export class RemoteAgent extends EventEmitter {
   }
 
   private openPty(cmd: string): void {
+    // Whatever is already open here is a second `tmux attach-session` on the
+    // same session. It keeps its own data handler, keeps receiving everything
+    // tmux emits, and keeps forwarding it — so the renderer writes every chunk
+    // once per live channel and the text arrives doubled, or tripled, or worse.
+    // Reassigning this.channel was never enough: it drops the reference while
+    // leaving the channel running.
+    //
+    // Observed on a real host: one session with clients at 120x40 and 160x57 —
+    // a stale channel still on the default pty size alongside the real one.
+    //
+    // Listeners come off before the close, or the 'close' handler below reads
+    // it as the session dropping out and starts a reconnect for a channel we
+    // are deliberately discarding.
+    const previous = this.channel
+    if (previous) {
+      this.channel = null
+      try { previous.removeAllListeners() } catch { /* ignore */ }
+      try { previous.stderr?.removeAllListeners() } catch { /* ignore */ }
+      try { previous.close() } catch { /* ignore */ }
+    }
+
     this.detached = false
     this.waitingForReconnect = false
 
